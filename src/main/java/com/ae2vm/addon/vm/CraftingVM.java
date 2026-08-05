@@ -182,6 +182,20 @@ public final class CraftingVM {
             case 17:
                 insertOutput(constantPool[readShort()], pop());
                 break;
+            case 18: {
+                int inputIndex = readShort();
+                int containerIndex = readShort();
+                long perCraft = readLong();
+                extractReusableIngredient(constantPool[inputIndex],
+                        constantPool[containerIndex], pop(), perCraft);
+                break;
+            }
+            case 19: {
+                int inputIndex = readShort();
+                int containerIndex = readShort();
+                extractContainer(constantPool[inputIndex], constantPool[containerIndex], pop());
+                break;
+            }
             case 255:
                 programCounter = code.length;
                 break;
@@ -364,6 +378,40 @@ public final class CraftingVM {
         if (count > 0) {
             insertInternal(key, count);
         }
+    }
+
+    private void extractReusableIngredient(IAEItemStack input,
+                                           IAEItemStack container,
+                                           BigInteger totalRequired,
+                                           long perCraft) {
+        if (totalRequired.signum() <= 0) {
+            push(BIG_ZERO);
+            return;
+        }
+
+        long got = extract(input, totalRequired);
+        if (got > 0) {
+            insertInternal(container, got);
+        }
+
+        BigInteger oneCraft = BigInteger.valueOf(Math.max(0L, perCraft));
+        BigInteger available = BigInteger.valueOf(got);
+        push(oneCraft.subtract(available).max(BIG_ZERO));
+    }
+
+    private void extractContainer(IAEItemStack input,
+                                   IAEItemStack container,
+                                   BigInteger required) {
+        if (required.signum() <= 0) {
+            push(BIG_ZERO);
+            return;
+        }
+
+        long got = extract(input, required);
+        if (got > 0) {
+            insertInternal(container, got);
+        }
+        push(required.subtract(BigInteger.valueOf(got)).max(BIG_ZERO));
     }
 
     private void insertInternal(IAEItemStack key, long count) {

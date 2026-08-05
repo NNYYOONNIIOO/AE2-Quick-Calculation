@@ -186,6 +186,21 @@ public final class CraftingBytecode {
             emitShort(constantIndex);
         }
 
+        public void emitExtractReusableIngredient(int inputIndex,
+                                                   int containerIndex,
+                                                   long perCraft) {
+            emit(Opcode.EXTRACT_REUSABLE);
+            emitShort(inputIndex);
+            emitShort(containerIndex);
+            emitLong(perCraft);
+        }
+
+        public void emitExtractContainer(int inputIndex, int containerIndex) {
+            emit(Opcode.EXTRACT_CONTAINER);
+            emitShort(inputIndex);
+            emitShort(containerIndex);
+        }
+
         public CraftingBytecode build() {
             if (outputIndex < 0) {
                 throw new IllegalStateException("Bytecode output was not set");

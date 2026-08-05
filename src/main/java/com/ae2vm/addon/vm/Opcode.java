@@ -20,6 +20,8 @@ public enum Opcode {
     RETURN(0x0F),
     CALL_BY_KEY(0x10),
     INSERT_OUTPUT(0x11),
+    EXTRACT_REUSABLE(0x12),
+    EXTRACT_CONTAINER(0x13),
     HALT(0xFF);
 
     public final int code;

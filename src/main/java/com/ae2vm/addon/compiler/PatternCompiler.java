@@ -121,18 +121,18 @@ public final class PatternCompiler {
                     builder.emit(Opcode.POP);
                 } else {
                     int containerIndex = builder.addConstant(container);
-                    // Keep the total input count on the stack while the two
-                    // extraction passes claim stock or crafted sub-outputs.
+                    // Reusable inputs are acquired in one batch: consume as
+                    // many existing copies as the request can use, then craft
+                    // only the shortfall needed for one simultaneous craft.
                     builder.emit(Opcode.DUP);
                     builder.emitPushLong(input.getStackSize());
                     builder.emit(Opcode.MUL);
-                    builder.emit(Opcode.DUP);
-                    builder.emitExtractIngredient(inputIndex);
+                    builder.emitExtractReusableIngredient(
+                            inputIndex, containerIndex, input.getStackSize());
                     builder.emit(Opcode.DUP);
                     builder.emitCallByKey(inputIndex);
-                    builder.emitExtractIngredient(inputIndex);
+                    builder.emitExtractContainer(inputIndex, containerIndex);
                     builder.emit(Opcode.POP);
-                    builder.emitInsertOutput(containerIndex);
                 }
             }
         }
