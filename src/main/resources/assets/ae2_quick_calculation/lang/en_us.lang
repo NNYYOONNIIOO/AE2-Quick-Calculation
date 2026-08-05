@@ -1,0 +1,13 @@
+ae2_quick_calculation.status.active=AE2 Quick Calculation: optimized calculation active
+ae2_quick_calculation.status.fallback=AE2 Quick Calculation: using native AE2 calculation
+ae2_quick_calculation.status.fallback.unsupported=AE2 Quick Calculation: native AE2 calculation (unsupported pattern semantics)
+ae2_quick_calculation.status.fallback.substitution=AE2 Quick Calculation: native AE2 calculation (unsupported substitution/container semantics)
+ae2_quick_calculation.status.fallback.container=AE2 Quick Calculation: native AE2 calculation (unsupported container or durability transition)
+ae2_quick_calculation.status.fallback.cycle=AE2 Quick Calculation: native AE2 calculation (cycle could not be proven safe)
+ae2_quick_calculation.status.fallback.cycle_no_seed=AE2 Quick Calculation: native AE2 calculation (cycle has insufficient seed material)
+ae2_quick_calculation.status.fallback.cycle_neutral=AE2 Quick Calculation: native AE2 calculation (cycle has no net gain)
+ae2_quick_calculation.status.fallback.cycle_dissipative=AE2 Quick Calculation: native AE2 calculation (cycle consumes net material)
+ae2_quick_calculation.status.fallback.cycle_complex=AE2 Quick Calculation: native AE2 calculation (cycle structure is too complex)
+ae2_quick_calculation.status.fallback.cycle_external=AE2 Quick Calculation: native AE2 calculation (cycle needs recursive external inputs)
+ae2_quick_calculation.status.runtime_failure=AE2 Quick Calculation: native AE2 calculation (optimizer runtime failure)
+ae2_quick_calculation.status.quantity_limit=AE2 Quick Calculation: quantity exceeds the 1.12.2 limit; calculation stopped

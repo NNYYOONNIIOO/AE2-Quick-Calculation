@@ -1,13 +1,13 @@
 [
 {
-  "modid": "ae2vm",
-  "name": "AE2 VM",
-  "description": "A stack-based crafting calculation accelerator for AE2 Unofficial Extended Life.",
+  "modid": "ae2_quick_calculation",
+  "name": "AE2 Quick Calculation",
+  "description": "A direct crafting calculation accelerator for AE2 Unofficial Extended Life.",
   "version": "${version}",
   "mcversion": "${mcversion}",
   "url": "",
   "updateUrl": "",
-  "authorList": ["AE2 VM contributors"],
+  "authorList": ["AE2 Quick Calculation contributors"],
   "credits": "Applied Energistics 2 and Forge communities",
   "logoFile": "",
   "screenshots": [],

@@ -14,8 +14,8 @@ apply plugin: 'eclipse'
 apply plugin: 'maven-publish'
 
 version = '1.0.0'
-group = 'com.ae2vm'
-archivesBaseName = 'ae2vm-1.12.2'
+group = 'com.ae2.quickcalculation'
+archivesBaseName = 'ae2-quick-calculation-1.12.2'
 ext.mcVersion = '1.12.2'
 
 sourceCompatibility = targetCompatibility = compileJava.sourceCompatibility = compileJava.targetCompatibility = '1.8' // Need this here so eclipse task generates correctly.
@@ -77,7 +77,7 @@ dependencies {
 
 }
 
-def mixinRefmap = file("${buildDir}/generated/resources/main/mixins.ae2vm.refmap.json")
+def mixinRefmap = file("${buildDir}/generated/resources/main/mixins.ae2_quick_calculation.refmap.json")
 
 // ForgeGradle adds normal implementation dependencies to the Java classpath,
 // but Forge's 1.12 development launcher discovers mods from run/mods. Copy
@@ -90,13 +90,13 @@ task copyMixinBooterToRun(type: Copy) {
 }
 
 task packageDevMixinResources(type: Jar) {
-    archiveName = 'ae2vm-dev-mixins.jar'
+    archiveName = 'ae2-quick-calculation-dev-mixins.jar'
     destinationDir = project.file('run/mods')
     from(project.file('src/main/resources')) {
-        include 'mixins.ae2vm.json'
+        include 'mixins.ae2_quick_calculation.json'
     }
     from(mixinRefmap) {
-        include 'mixins.ae2vm.refmap.json'
+        include 'mixins.ae2_quick_calculation.refmap.json'
     }
     dependsOn processResources
 }
@@ -110,7 +110,7 @@ tasks.whenTaskAdded { task ->
 
 sourceSets {
     main {
-        ext.refMap = 'mixins.ae2vm.refmap.json'
+        ext.refMap = 'mixins.ae2_quick_calculation.refmap.json'
     }
 }
 
@@ -129,7 +129,7 @@ processResources {
 
     // Mixin 0.8.7 requires a JAR URL for a late config. The dev-run resource
     // JAR and the final mod JAR add this file explicitly below.
-    exclude 'mixins.ae2vm.json'
+    exclude 'mixins.ae2_quick_calculation.json'
 
     filesMatching('mcmod.info') {
         expand 'version': project.version, 'mcversion': project.ext.mcVersion
@@ -138,22 +138,50 @@ processResources {
     dependsOn compileJava
 }
 
+// The stress test uses the real calculator and AE2 item lists without
+// starting a Minecraft server. It is intentionally separate from Gradle's
+// unit-test discovery because this project does not add a test framework.
+task stressTest(type: JavaExec) {
+    dependsOn 'prepareRunServer'
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    main = 'net.minecraftforge.legacydev.MainServer'
+    environment 'mainClass', 'net.minecraft.launchwrapper.Launch'
+    environment 'tweakClass',
+            'com.ae2.quickcalculation.calculator.CraftingCalculatorStressTweaker'
+    environment 'MCP_TO_SRG',
+            file('build/createSrgToMcp/output.srg').absolutePath
+    environment 'FORGE_GROUP', 'net.minecraftforge'
+    environment 'FORGE_VERSION', '14.23.5.2859'
+    environment 'MCP_MAPPINGS', 'snapshot_20171003-1.12'
+    environment 'MC_VERSION', '1.12.2'
+    environment 'MOD_CLASSES',
+            (sourceSets.test.output.resourcesDir.absolutePath + File.pathSeparator
+                    + sourceSets.test.output.classesDir.absolutePath + File.pathSeparator
+                    + sourceSets.main.output.resourcesDir.absolutePath + File.pathSeparator
+                    + sourceSets.main.output.classesDir.absolutePath)
+    args '--version', 'FML_DEV',
+            '--gameDir', project.file('run').absolutePath,
+            '--assetsDir', project.file('run/assets').absolutePath
+    maxHeapSize = '2G'
+}
+
 // Example for how to get properties into the manifest for reading by the runtime..
 jar {
     from(project.file('src/main/resources')) {
-        include 'mixins.ae2vm.json'
+        include 'mixins.ae2_quick_calculation.json'
     }
     from(mixinRefmap) {
-        include 'mixins.ae2vm.refmap.json'
+        include 'mixins.ae2_quick_calculation.refmap.json'
     }
     manifest {
         attributes([
-            "Specification-Title": "AE2 VM",
-            "Specification-Vendor": "ae2vm",
+            "Specification-Title": "AE2 Quick Calculation",
+            "Specification-Vendor": "ae2_quick_calculation",
             "Specification-Version": "1", // We are version 1 of ourselves
             "Implementation-Title": project.name,
             "Implementation-Version": "${version}",
-            "Implementation-Vendor" :"ae2vm",
+            "Implementation-Vendor" :"ae2_quick_calculation",
             "Implementation-Timestamp": new Date().format("yyyy-MM-dd'T'HH:mm:ssZ"),
             "ForceLoadAsMod": "true",
             "FMLCorePluginContainsFMLMod": "true"

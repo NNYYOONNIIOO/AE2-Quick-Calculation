@@ -1,6 +1,6 @@
 {
-  "package": "com.ae2vm.addon.mixin",
-  "refmap": "mixins.ae2vm.refmap.json",
+  "package": "com.ae2.quickcalculation.mixin",
+  "refmap": "mixins.ae2_quick_calculation.refmap.json",
   "target": "@env(DEFAULT)",
   "minVersion": "0.8",
   "compatibilityLevel": "JAVA_8",
