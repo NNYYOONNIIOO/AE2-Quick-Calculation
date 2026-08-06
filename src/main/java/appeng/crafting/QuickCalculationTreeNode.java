@@ -180,12 +180,6 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
         calculationKey.reset();
         IAEItemStack key = calculationKey.copy();
 
-        // CraftingTreeNode treats an emitter as authoritative, even when a
-        // crafting pattern for the same key is also present.
-        if (canEmitFor(key, calculationKey, amountHint)) {
-            return CraftingCalculator.Result.direct(key, amount, true);
-        }
-
         ICraftingPatternDetails selected = null;
         for (ICraftingPatternDetails candidate : getCraftingFor(
                 calculationKey, amountHint)) {
@@ -197,6 +191,11 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
             }
         }
 
+        // A level emitter can mark an output as emitable even when a crafting
+        // pattern for the same key exists. The native tree treats that flag as
+        // an unconditional shortcut, but doing so here drops every pattern
+        // input from the plan. Prefer the actual pattern; use the external
+        // emitter only when no matching pattern exists.
         if (selected == null) {
             return CraftingCalculator.Result.direct(
                     key, amount, canEmitFor(key, calculationKey, amountHint));
