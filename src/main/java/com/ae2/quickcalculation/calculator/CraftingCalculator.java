@@ -1918,13 +1918,16 @@ public final class CraftingCalculator {
 
         public void populatePlan(IItemList<IAEItemStack> plan) {
             for (IAEItemStack missing : missingItems) {
-                plan.add(missing.copy());
+                addPlanStorage(plan, missing);
             }
             for (IAEItemStack used : usedItems) {
-                plan.add(used.copy());
+                addPlanStorage(plan, used);
             }
             for (IAEItemStack emitted : emittedItems) {
-                IAEItemStack requestable = emitted.copy();
+                IAEItemStack requestable = normalizeForCalculation(emitted);
+                if (requestable == null) {
+                    continue;
+                }
                 requestable.setCountRequestable(requestable.getStackSize());
                 plan.addRequestable(requestable);
             }
@@ -1938,12 +1941,26 @@ public final class CraftingCalculator {
                     if (output == null || output.getStackSize() <= 0L) {
                         continue;
                     }
-                    IAEItemStack requestable = output.copy();
+                    IAEItemStack requestable = normalizeForCalculation(output);
+                    if (requestable == null) {
+                        continue;
+                    }
                     requestable.setCountRequestable(
                             checkedMultiply(output.getStackSize(), crafts));
                     plan.addRequestable(requestable);
                 }
             }
+        }
+
+        private static void addPlanStorage(IItemList<IAEItemStack> plan,
+                                           IAEItemStack stack) {
+            IAEItemStack normalized = normalizeForCalculation(stack);
+            if (normalized == null || normalized.getStackSize() <= 0L) {
+                return;
+            }
+            normalized.setCountRequestable(0L);
+            normalized.setCraftable(false);
+            plan.add(normalized);
         }
 
         public void apply(MECraftingInventory storage,

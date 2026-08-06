@@ -53,7 +53,8 @@ final class AE2FluidCraftApi {
         }
 
         FluidStack fluid = FakeItemRegister.getStack(stack);
-        if (fluid == null && stack.getItem() == FCItems.FLUID_DROP
+        if ((fluid == null || fluid.amount <= 0)
+                && stack.getItem() == FCItems.FLUID_DROP
                 && amountHint > 0L) {
             // A calculation key has normally been reset to size zero. A drop
             // does not store its amount in NBT, so reconstruct a bounded
