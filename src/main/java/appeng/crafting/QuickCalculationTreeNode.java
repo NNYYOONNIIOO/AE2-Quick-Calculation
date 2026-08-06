@@ -13,6 +13,7 @@ import appeng.api.storage.data.IAEFluidStack;
 import appeng.api.storage.data.IAEItemStack;
 import appeng.api.storage.data.IItemList;
 import appeng.me.cluster.implementations.CraftingCPUCluster;
+import appeng.util.inv.ItemListIgnoreCrafting;
 import com.ae2.quickcalculation.calculator.CraftingCalculator;
 import com.ae2.quickcalculation.AE2QuickCalculation;
 import com.ae2.quickcalculation.compat.AE2FluidCraftCompat;
@@ -280,7 +281,11 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
                 IMEMonitor<IAEItemStack> itemInventory =
                         storageGrid.getInventory(itemChannel);
                 if (itemInventory != null) {
-                    itemInventory.getAvailableItems(sourceItems);
+                    // CraftingGridCache contributes craftable entries to
+                    // getAvailableItems(). They are not network stock and
+                    // must not satisfy a calculation input.
+                    itemInventory.getAvailableItems(
+                            new ItemListIgnoreCrafting<IAEItemStack>(sourceItems));
                 }
             }
         }
@@ -308,6 +313,11 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
                 || isRequestedOutput(normalized)) {
             return;
         }
+        // The calculator's snapshot is a storage-only ledger. Status bits
+        // from a monitor list must not turn a stored stack into a craftable or
+        // requestable entry while it is copied into the private inventory.
+        normalized.setCraftable(false);
+        normalized.setCountRequestable(0L);
         IAEItemStack existing = copiedItems.findPrecise(normalized);
         if (existing == null) {
             copiedItems.add(normalized);
@@ -331,7 +341,8 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
         IItemList<IAEItemStack> available = itemChannel.createList();
         IMEMonitor<IAEItemStack> itemInventory = storageGrid.getInventory(itemChannel);
         if (itemInventory != null) {
-            itemInventory.getAvailableItems(available);
+            itemInventory.getAvailableItems(
+                    new ItemListIgnoreCrafting<IAEItemStack>(available));
             for (IAEItemStack item : available) {
                 IAEItemStack normalized = AE2FluidCraftCompat.normalizeFluidItem(item);
                 if (normalized == null || normalized.getStackSize() <= 0L
@@ -362,7 +373,8 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
             return;
         }
         IItemList<IAEFluidStack> fluids = fluidChannel.createList();
-        fluidInventory.getAvailableItems(fluids);
+        fluidInventory.getAvailableItems(
+                new ItemListIgnoreCrafting<IAEFluidStack>(fluids));
         for (IAEFluidStack fluid : fluids) {
             if (fluid == null || fluid.getStackSize() <= 0L) {
                 continue;
