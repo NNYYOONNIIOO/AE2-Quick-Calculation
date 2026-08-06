@@ -20,7 +20,10 @@ import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.world.World;
 import com.ae2.quickcalculation.network.AE2QuickCalculationNetwork;
 
+import java.util.Collection;
+import java.util.LinkedHashSet;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Drop-in replacement for AE2UEL's root CraftingTreeNode.
@@ -167,20 +170,28 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
 
     private CraftingCalculator.Result calculate(MECraftingInventory inventory,
                                                 long amount) {
-        IAEItemStack key = requestedOutput.copy();
-        key.reset();
+        IAEItemStack originalKey = requestedOutput.copy();
+        IAEItemStack calculationKey = AE2FluidCraftCompat.normalizeFluidItem(
+                originalKey);
+        if (calculationKey == null) {
+            calculationKey = originalKey;
+        }
+        long amountHint = calculationKey.getStackSize();
+        calculationKey.reset();
+        IAEItemStack key = calculationKey.copy();
 
         // CraftingTreeNode treats an emitter as authoritative, even when a
         // crafting pattern for the same key is also present.
-        if (craftingGrid.canEmitFor(key)) {
+        if (canEmitFor(key, calculationKey, amountHint)) {
             return CraftingCalculator.Result.direct(key, amount, true);
         }
 
         ICraftingPatternDetails selected = null;
-        for (ICraftingPatternDetails candidate : craftingGrid.getCraftingFor(
-                key, null, -1, world)) {
-            IAEItemStack primary = candidate.getPrimaryOutput();
-            if (primary != null && primary.isSameType(key)) {
+        for (ICraftingPatternDetails candidate : getCraftingFor(
+                calculationKey, amountHint)) {
+            IAEItemStack primary = AE2FluidCraftCompat.normalizeFluidItem(
+                    candidate.getPrimaryOutput());
+            if (primary != null && primary.isSameType(calculationKey)) {
                 selected = candidate;
                 break;
             }
@@ -188,7 +199,7 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
 
         if (selected == null) {
             return CraftingCalculator.Result.direct(
-                    key, amount, craftingGrid.canEmitFor(key));
+                    key, amount, canEmitFor(key, calculationKey, amountHint));
         }
 
         // Use a private, current snapshot for the direct calculator. CraftingJob's
@@ -202,13 +213,68 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
                 selected, amount, calculationInventory);
     }
 
+    private boolean canEmitFor(IAEItemStack originalKey,
+                               IAEItemStack calculationKey,
+                               long amountHint) {
+        if (craftingGrid.canEmitFor(originalKey)
+                || craftingGrid.canEmitFor(calculationKey)) {
+            return true;
+        }
+
+        long[] queryAmounts = new long[]{amountHint, 1000L, 1L};
+        for (long queryAmount : queryAmounts) {
+            if (queryAmount <= 0L) {
+                continue;
+            }
+            IAEItemStack packet = AE2FluidCraftCompat.packFluidPacket(
+                    calculationKey, queryAmount);
+            if (packet != null && craftingGrid.canEmitFor(packet)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private Collection<ICraftingPatternDetails> getCraftingFor(IAEItemStack key) {
+        return getCraftingFor(key, 0L);
+    }
+
+    private Collection<ICraftingPatternDetails> getCraftingFor(IAEItemStack key,
+                                                                long amountHint) {
+        Set<ICraftingPatternDetails> result =
+                new LinkedHashSet<ICraftingPatternDetails>();
+        addCraftingFor(result, key);
+
+        if (AE2FluidCraftCompat.isFluidFakeItem(
+                key == null ? null : key.getDefinition())) {
+            long[] queryAmounts = new long[]{amountHint, key.getStackSize(), 1000L, 1L};
+            for (long queryAmount : queryAmounts) {
+                if (queryAmount <= 0L) {
+                    continue;
+                }
+                IAEItemStack packet = AE2FluidCraftCompat.packFluidPacket(
+                        key, queryAmount);
+                if (packet != null && !packet.isSameType(key)) {
+                    addCraftingFor(result, packet);
+                }
+            }
+        }
+        return result;
+    }
+
+    private void addCraftingFor(Set<ICraftingPatternDetails> result,
+                                IAEItemStack key) {
+        if (key != null) {
+            result.addAll(craftingGrid.getCraftingFor(key, null, -1, world));
+        }
+    }
+
     private IItemList<IAEItemStack> createCalculationSnapshot(
             MECraftingInventory inventory) {
         IItemStorageChannel itemChannel = AEApi.instance().storage()
                 .getStorageChannel(IItemStorageChannel.class);
         IItemList<IAEItemStack> sourceItems = itemChannel.createList();
 
-        boolean readCurrentItems = false;
         if (grid != null) {
             IStorageGrid storageGrid = grid.getCache(IStorageGrid.class);
             if (storageGrid != null) {
@@ -216,30 +282,39 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
                         storageGrid.getInventory(itemChannel);
                 if (itemInventory != null) {
                     itemInventory.getAvailableItems(sourceItems);
-                    readCurrentItems = true;
-                }
-            }
-        }
-
-        if (!readCurrentItems) {
-            for (IAEItemStack item : inventory.getItemList()) {
-                if (item != null && item.getStackSize() > 0L) {
-                    sourceItems.add(item.copy());
                 }
             }
         }
 
         IItemList<IAEItemStack> copiedItems = itemChannel.createList();
         for (IAEItemStack item : sourceItems) {
-            if (item == null || item.getStackSize() <= 0L
-                    || requestedOutput.isSameType(item)) {
-                continue;
-            }
-            copiedItems.add(item.copy());
+            addSnapshotItem(copiedItems, item, true);
+        }
+        // CraftingJob's original list is still useful for ordinary items when
+        // an integration supplies only a partial getAvailableItems() view.
+        // Never add a duplicate here: the fresh network snapshot wins.
+        for (IAEItemStack item : inventory.getItemList()) {
+            addSnapshotItem(copiedItems, item, false);
         }
 
         mergeFluidItems(copiedItems);
         return copiedItems;
+    }
+
+    private void addSnapshotItem(IItemList<IAEItemStack> copiedItems,
+                                 IAEItemStack item,
+                                 boolean replaceExisting) {
+        IAEItemStack normalized = AE2FluidCraftCompat.normalizeFluidItem(item);
+        if (normalized == null || normalized.getStackSize() <= 0L
+                || isRequestedOutput(normalized)) {
+            return;
+        }
+        IAEItemStack existing = copiedItems.findPrecise(normalized);
+        if (existing == null) {
+            copiedItems.add(normalized);
+        } else if (replaceExisting) {
+            existing.setStackSize(normalized.getStackSize());
+        }
     }
 
     private void mergeFluidItems(IItemList<IAEItemStack> copiedItems) {
@@ -259,18 +334,20 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
         if (itemInventory != null) {
             itemInventory.getAvailableItems(available);
             for (IAEItemStack item : available) {
-                if (item == null || item.getStackSize() <= 0L
-                        || !AE2FluidCraftCompat.isFluidFakeItem(item.getDefinition())
-                        || requestedOutput.isSameType(item)) {
+                IAEItemStack normalized = AE2FluidCraftCompat.normalizeFluidItem(item);
+                if (normalized == null || normalized.getStackSize() <= 0L
+                        || !AE2FluidCraftCompat.isFluidFakeItem(
+                        normalized.getDefinition())
+                        || isRequestedOutput(normalized)) {
                     continue;
                 }
-                IAEItemStack existing = copiedItems.findPrecise(item);
+                IAEItemStack existing = copiedItems.findPrecise(normalized);
                 if (existing == null) {
-                    copiedItems.add(item.copy());
+                    copiedItems.add(normalized);
                 } else {
                     // getAvailableItems() is the authoritative view for AE2FC's
                     // virtual fluid entries. Do not retain a stale cached count.
-                    existing.setStackSize(item.getStackSize());
+                    existing.setStackSize(normalized.getStackSize());
                 }
             }
         }
@@ -293,7 +370,7 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
             }
             IAEItemStack fakeFluid = AE2FluidCraftCompat.packFluid(fluid);
             if (fakeFluid == null || fakeFluid.getStackSize() <= 0L
-                    || requestedOutput.isSameType(fakeFluid)) {
+                    || isRequestedOutput(fakeFluid)) {
                 continue;
             }
             IAEItemStack existing = copiedItems.findPrecise(fakeFluid);
@@ -303,6 +380,11 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
                 existing.setStackSize(fakeFluid.getStackSize());
             }
         }
+    }
+
+    private boolean isRequestedOutput(IAEItemStack item) {
+        IAEItemStack output = AE2FluidCraftCompat.normalizeFluidItem(requestedOutput);
+        return output != null && item != null && output.isSameType(item);
     }
 
     private void reportStartStatus(IActionSource source) {

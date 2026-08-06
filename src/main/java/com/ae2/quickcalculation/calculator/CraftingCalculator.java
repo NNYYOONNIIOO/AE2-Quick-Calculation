@@ -15,6 +15,7 @@ import appeng.crafting.MECraftingInventory;
 import appeng.me.cluster.implementations.CraftingCPUCluster;
 import appeng.util.Platform;
 import appeng.util.item.AEItemStack;
+import com.ae2.quickcalculation.compat.AE2FluidCraftCompat;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.world.World;
@@ -73,7 +74,8 @@ public final class CraftingCalculator {
                     "Pattern requires AE2 native slot handling: " + rootPattern);
         }
 
-        IAEItemStack output = rootPattern.getPrimaryOutput();
+        IAEItemStack output = normalizeForCalculation(
+                rootPattern.getPrimaryOutput());
         if (output == null || output.getStackSize() <= 0) {
             throw unsupported(FallbackReason.INVALID_OUTPUT,
                     "Pattern has no positive primary output");
@@ -112,7 +114,12 @@ public final class CraftingCalculator {
             return;
         }
         Deque<PatternFrame> frames = new ArrayDeque<PatternFrame>();
-        IAEItemStack rootKey = rootPattern.pattern.getPrimaryOutput().copy();
+        IAEItemStack rootKey = normalizeForCalculation(
+                rootPattern.pattern.getPrimaryOutput());
+        if (rootKey == null) {
+            throw unsupported(FallbackReason.INVALID_OUTPUT,
+                    "Pattern has no valid primary output");
+        }
         rootKey.reset();
         activeKeys.add(rootKey);
         frames.push(new PatternFrame(rootPattern, crafts, rootKey));
@@ -156,7 +163,7 @@ public final class CraftingCalculator {
                                 missingUses,
                                 input.durability.capacity(input.input.getItemDamage()));
                         frame.continuation = InputContinuation.durable(input, missingUses);
-                        scheduleRequest(input.key, freshItems, frames);
+                        scheduleRequest(input.key, freshItems, input.perCraft, frames);
                     }
                 } else if (input.container == null) {
                     long missing = acquireNormalInput(input, totalRequired);
@@ -164,7 +171,7 @@ public final class CraftingCalculator {
                         InputOption option = selectCraftingOption(input);
                         frame.continuation = InputContinuation.normal(
                                 option.key, null, missing, false);
-                        scheduleRequest(option.key, missing, frames);
+                        scheduleRequest(option.key, missing, input.perCraft, frames);
                     }
                 } else if (!input.reusable) {
                     // A non-identical container is returned once for every
@@ -179,7 +186,7 @@ public final class CraftingCalculator {
                         InputOption option = selectCraftingOption(input);
                         frame.continuation = InputContinuation.returned(
                                 option.key, input.container, missing);
-                        scheduleRequest(option.key, missing, frames);
+                        scheduleRequest(option.key, missing, input.perCraft, frames);
                     }
                 } else {
                     // Only simultaneous crafts need distinct reusable copies.
@@ -199,7 +206,7 @@ public final class CraftingCalculator {
                     // one-item or whole-order request.
                     if (missingForParallelBatch > 0L) {
                         InputOption option = selectCraftingOption(input);
-                        PatternChoice choice = resolvePattern(option.key);
+                        PatternChoice choice = resolvePattern(option.key, input.perCraft);
                         long minimumCopies = Math.min(totalRequired, input.perCraft);
                         long requestAmount = choice.external || choice.pattern != null
                                 ? missingForParallelBatch
@@ -208,7 +215,7 @@ public final class CraftingCalculator {
                             frame.continuation = InputContinuation.normal(
                                     option.key, option.container,
                                     requestAmount, true);
-                            scheduleRequest(option.key, requestAmount, frames);
+                            scheduleRequest(option.key, requestAmount, input.perCraft, frames);
                         }
                     }
                 }
@@ -246,7 +253,12 @@ public final class CraftingCalculator {
             return false;
         }
 
-        IAEItemStack rootKey = rootPattern.pattern.getPrimaryOutput().copy();
+        IAEItemStack rootKey = normalizeForCalculation(
+                rootPattern.pattern.getPrimaryOutput());
+        if (rootKey == null) {
+            throw unsupported(FallbackReason.INVALID_OUTPUT,
+                    "Pattern has no valid primary output");
+        }
         rootKey.reset();
         List<CycleStepInfo> candidate = findRootCycle(rootPattern, rootKey);
         if (candidate == null) {
@@ -302,8 +314,7 @@ public final class CraftingCalculator {
             return null;
         }
 
-        for (ICraftingPatternDetails candidate
-                : grid.getCraftingFor(currentKey, null, -1, world)) {
+        for (ICraftingPatternDetails candidate : getCraftingFor(currentKey)) {
             if (!isSupported(candidate)) {
                 continue;
             }
@@ -511,7 +522,7 @@ public final class CraftingCalculator {
         }
 
         InputOption option = selectCraftingOption(need.input);
-        PatternChoice choice = resolvePattern(option.key);
+        PatternChoice choice = resolvePattern(option.key, need.input.perCraft);
         if (choice.external) {
             provideExternal(option.key, missing);
         } else if (choice.pattern == null) {
@@ -631,7 +642,7 @@ public final class CraftingCalculator {
 
     private InputOption selectCraftingOption(InputInfo input) {
         for (InputOption option : input.options) {
-            PatternChoice choice = resolvePattern(option.key);
+            PatternChoice choice = resolvePattern(option.key, input.perCraft);
             if (choice.external || choice.pattern != null) {
                 return option;
             }
@@ -824,11 +835,18 @@ public final class CraftingCalculator {
     private void scheduleRequest(IAEItemStack normalizedKey,
                                  long required,
                                  Deque<PatternFrame> frames) {
+        scheduleRequest(normalizedKey, required, 0L, frames);
+    }
+
+    private void scheduleRequest(IAEItemStack normalizedKey,
+                                 long required,
+                                 long amountHint,
+                                 Deque<PatternFrame> frames) {
         if (required <= 0L) {
             return;
         }
 
-        PatternChoice choice = resolvePattern(normalizedKey);
+        PatternChoice choice = resolvePattern(normalizedKey, amountHint);
         if (choice.external) {
             provideExternal(normalizedKey, required);
             return;
@@ -859,7 +877,7 @@ public final class CraftingCalculator {
         }
 
         List<OutputInfo> outputs = new ArrayList<OutputInfo>();
-        IAEItemStack[] patternOutputs = pattern.getOutputs();
+        IAEItemStack[] patternOutputs = getCalculationOutputs(pattern);
         if (patternOutputs != null) {
             for (IAEItemStack output : patternOutputs) {
                 if (output != null && output.getStackSize() > 0L) {
@@ -869,7 +887,11 @@ public final class CraftingCalculator {
         }
 
         List<InputInfo> inputs = new ArrayList<InputInfo>();
-        IAEItemStack[] condensedInputs = pattern.getCondensedInputs();
+        IAEItemStack[] condensedInputs = getCalculationInputs(pattern);
+        if (condensedInputs == null || condensedInputs.length == 0) {
+            throw unsupported(FallbackReason.UNSUPPORTED_PATTERN,
+                    "Pattern has no usable inputs: " + pattern);
+        }
         for (IAEItemStack input : condensedInputs) {
             if (input == null || input.getStackSize() <= 0L) {
                 continue;
@@ -877,12 +899,12 @@ public final class CraftingCalculator {
             ContainerInfo container = inspectContainer(input);
             boolean returnedByPattern = false;
             IAEItemStack returned = findExactReturnedInput(
-                    pattern.getOutputs(), input);
+                    patternOutputs, input);
             if (returned == null) {
                 // Some third-party pattern details expose the clean output
                 // view more accurately than their slot-preserving view.
                 returned = findExactReturnedInput(
-                        pattern.getCondensedOutputs(), input);
+                        getCalculationOutputsFromCondensed(pattern), input);
             }
             if (returned != null && (container == null
                     || (container.durability == null
@@ -1034,12 +1056,18 @@ public final class CraftingCalculator {
     }
 
     private PatternChoice resolvePattern(IAEItemStack key) {
+        return resolvePattern(key, 0L);
+    }
+
+    private PatternChoice resolvePattern(IAEItemStack key, long amountHint) {
         PatternChoice cached = patternCache.get(key);
-        if (cached != null) {
+        if (cached != null && (!isFluidKey(key)
+                || cached.external || cached.pattern != null
+                || amountHint <= 0L)) {
             return cached;
         }
 
-        if (grid.canEmitFor(key)) {
+        if (canEmitFor(key, amountHint)) {
             PatternChoice external = new PatternChoice(true, null, 0L);
             patternCache.put(key, external);
             return external;
@@ -1047,8 +1075,8 @@ public final class CraftingCalculator {
 
         ICraftingPatternDetails pattern = null;
         long outputAmount = 0L;
-        for (ICraftingPatternDetails candidate : grid.getCraftingFor(key, null, -1, world)) {
-            IAEItemStack[] outputs = candidate.getOutputs();
+        for (ICraftingPatternDetails candidate : getCraftingFor(key, amountHint)) {
+            IAEItemStack[] outputs = getCalculationOutputs(candidate);
             if (outputs == null) {
                 continue;
             }
@@ -1066,8 +1094,73 @@ public final class CraftingCalculator {
         }
 
         PatternChoice choice = new PatternChoice(false, pattern, outputAmount);
-        patternCache.put(key, choice);
+        // A packet-indexed fluid pattern can only be found after the caller
+        // supplies its per-craft fluid amount. Do not cache a fluid miss from
+        // an amount-less probe and hide a later, more precise query.
+        if (!isFluidKey(key) || pattern != null) {
+            patternCache.put(key, choice);
+        }
         return choice;
+    }
+
+    private Collection<ICraftingPatternDetails> getCraftingFor(IAEItemStack key) {
+        return getCraftingFor(key, 0L);
+    }
+
+    private Collection<ICraftingPatternDetails> getCraftingFor(IAEItemStack key,
+                                                                long amountHint) {
+        Set<ICraftingPatternDetails> result =
+                new LinkedHashSet<ICraftingPatternDetails>();
+        if (key != null) {
+            result.addAll(grid.getCraftingFor(key, null, -1, world));
+        }
+
+        if (AE2FluidCraftCompat.isFluidFakeItem(
+                key == null ? null : key.getDefinition())) {
+            long[] queryAmounts = new long[]{amountHint, key.getStackSize(), 1000L, 1L};
+            for (long queryAmount : queryAmounts) {
+                if (queryAmount <= 0L) {
+                    continue;
+                }
+                IAEItemStack packet = AE2FluidCraftCompat.packFluidPacket(
+                        key, queryAmount);
+                if (packet != null && !packet.isSameType(key)) {
+                    result.addAll(grid.getCraftingFor(packet, null, -1, world));
+                }
+            }
+        }
+        return result;
+    }
+
+    private boolean canEmitFor(IAEItemStack key, long amountHint) {
+        if (key == null) {
+            return false;
+        }
+        if (grid.canEmitFor(key)) {
+            return true;
+        }
+
+        if (!isFluidKey(key)) {
+            return false;
+        }
+
+        long[] queryAmounts = new long[]{amountHint, key.getStackSize(), 1000L, 1L};
+        for (long queryAmount : queryAmounts) {
+            if (queryAmount <= 0L) {
+                continue;
+            }
+            IAEItemStack packet = AE2FluidCraftCompat.packFluidPacket(
+                    key, queryAmount);
+            if (packet != null && grid.canEmitFor(packet)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isFluidKey(IAEItemStack key) {
+        return AE2FluidCraftCompat.isFluidFakeItem(
+                key == null ? null : key.getDefinition());
     }
 
     private void provideExternal(IAEItemStack key, long amount) {
@@ -1175,8 +1268,8 @@ public final class CraftingCalculator {
             return false;
         }
 
-        IAEItemStack[] inputs = pattern.getCondensedInputs();
-        if (inputs == null) {
+        IAEItemStack[] inputs = getCalculationInputs(pattern);
+        if (inputs == null || inputs.length == 0) {
             return false;
         }
 
@@ -1213,6 +1306,57 @@ public final class CraftingCalculator {
             }
         }
         return true;
+    }
+
+    private static IAEItemStack[] getCalculationInputs(
+            ICraftingPatternDetails pattern) {
+        IAEItemStack[] condensed = pattern.getCondensedInputs();
+        IAEItemStack[] normalized = normalizeAndCondense(condensed);
+        if (normalized != null && normalized.length > 0) {
+            return normalized;
+        }
+
+        // Some integrations expose only the slot-preserving array. An empty
+        // condensed view must not turn a real recipe into a no-input recipe.
+        return normalizeAndCondense(pattern.getInputs());
+    }
+
+    private static IAEItemStack[] getCalculationOutputs(
+            ICraftingPatternDetails pattern) {
+        return normalizeAndCondense(pattern.getOutputs());
+    }
+
+    private static IAEItemStack[] getCalculationOutputsFromCondensed(
+            ICraftingPatternDetails pattern) {
+        return normalizeAndCondense(pattern.getCondensedOutputs());
+    }
+
+    private static IAEItemStack[] normalizeAndCondense(IAEItemStack[] stacks) {
+        if (stacks == null) {
+            return null;
+        }
+
+        IItemList<IAEItemStack> condensed = newItemList();
+        for (IAEItemStack stack : stacks) {
+            if (stack == null || stack.getStackSize() <= 0L) {
+                continue;
+            }
+            IAEItemStack normalized = normalizeForCalculation(stack);
+            if (normalized == null || normalized.getStackSize() <= 0L) {
+                return null;
+            }
+            condensed.add(normalized);
+        }
+
+        List<IAEItemStack> result = new ArrayList<IAEItemStack>();
+        for (IAEItemStack stack : condensed) {
+            result.add(stack);
+        }
+        return result.toArray(new IAEItemStack[result.size()]);
+    }
+
+    private static IAEItemStack normalizeForCalculation(IAEItemStack stack) {
+        return AE2FluidCraftCompat.normalizeFluidItem(stack);
     }
 
     private static boolean sameReusableContainer(IAEItemStack input,
@@ -1265,7 +1409,8 @@ public final class CraftingCalculator {
         List<Integer> slots = new ArrayList<Integer>();
         for (int index = 0; index < inputs.length; index++) {
             IAEItemStack input = inputs[index];
-            if (input != null && sameItemAndTags(input, condensedInput)) {
+            IAEItemStack normalized = normalizeForCalculation(input);
+            if (normalized != null && sameItemAndTags(normalized, condensedInput)) {
                 slots.add(index);
             }
         }
@@ -1785,7 +1930,7 @@ public final class CraftingCalculator {
             }
             for (Map.Entry<ICraftingPatternDetails, Long> entry : patternTimes.entrySet()) {
                 long crafts = entry.getValue();
-                IAEItemStack[] outputs = entry.getKey().getOutputs();
+                IAEItemStack[] outputs = getCalculationOutputs(entry.getKey());
                 if (outputs == null) {
                     continue;
                 }

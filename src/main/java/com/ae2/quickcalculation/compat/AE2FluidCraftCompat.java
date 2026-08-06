@@ -45,4 +45,47 @@ public final class AE2FluidCraftCompat {
             return null;
         }
     }
+
+    /**
+     * Returns the canonical AE2FC item-channel key for a fake fluid item.
+     * Processing patterns may store packets while the network monitor exposes
+     * drops, so both forms must be normalized before exact list lookups.
+     */
+    public static IAEItemStack normalizeFluidItem(IAEItemStack stack) {
+        if (stack == null || !isAvailable()) {
+            return stack == null ? null : stack.copy();
+        }
+
+        try {
+            return AE2FluidCraftApi.normalizeFluidItem(stack);
+        } catch (LinkageError ignored) {
+            return stack.copy();
+        } catch (RuntimeException ignored) {
+            return stack.copy();
+        }
+    }
+
+    /** Returns the packet form used when querying pattern providers. */
+    public static IAEItemStack packFluidPacket(IAEItemStack stack) {
+        return packFluidPacket(stack, 0L);
+    }
+
+    /**
+     * Returns a packet query key using the per-craft fluid amount when the
+     * canonical drop key itself has no amount left after reset().
+     */
+    public static IAEItemStack packFluidPacket(IAEItemStack stack,
+                                                long amountHint) {
+        if (stack == null || !isAvailable()) {
+            return null;
+        }
+
+        try {
+            return AE2FluidCraftApi.packFluidPacket(stack, amountHint);
+        } catch (LinkageError ignored) {
+            return null;
+        } catch (RuntimeException ignored) {
+            return null;
+        }
+    }
 }
