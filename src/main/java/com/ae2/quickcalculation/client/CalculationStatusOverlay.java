@@ -18,12 +18,13 @@ import java.util.List;
 /** Draws calculation status above the active GUI, including AE2 CPU screens. */
 @SideOnly(Side.CLIENT)
 public final class CalculationStatusOverlay {
-    private static final long DISPLAY_TIME_MILLIS = 7000L;
+    private static final long DISPLAY_TIME_MILLIS = 12000L;
     private static final CalculationStatusOverlay INSTANCE =
             new CalculationStatusOverlay();
 
     private static String translationKey;
     private static long displayUntil;
+    private static boolean drawn;
     private static boolean registered;
 
     private CalculationStatusOverlay() {
@@ -42,6 +43,7 @@ public final class CalculationStatusOverlay {
         }
         translationKey = key;
         displayUntil = System.currentTimeMillis() + DISPLAY_TIME_MILLIS;
+        drawn = false;
     }
 
     @SubscribeEvent
@@ -61,8 +63,17 @@ public final class CalculationStatusOverlay {
     }
 
     private static void draw(int screenWidth, int screenHeight) {
-        if (translationKey == null || System.currentTimeMillis() >= displayUntil) {
+        long now = System.currentTimeMillis();
+        if (translationKey == null || now >= displayUntil) {
             return;
+        }
+
+        // A calculation can finish while the confirm screen is being opened.
+        // Keep the message alive for a full interval after its first actual
+        // draw instead of letting that race consume the whole lifetime.
+        if (!drawn) {
+            drawn = true;
+            displayUntil = now + DISPLAY_TIME_MILLIS;
         }
 
         Minecraft minecraft = Minecraft.getMinecraft();
@@ -78,14 +89,16 @@ public final class CalculationStatusOverlay {
                 Math.max(160, longestLine + 20));
         int boxHeight = Math.max(20, lines.size() * 10 + 10);
         int x = (screenWidth - boxWidth) / 2;
-        int y = 4;
+        int y = 3;
 
         GlStateManager.pushMatrix();
+        GlStateManager.disableDepth();
         Gui.drawRect(x, y, x + boxWidth, y + boxHeight, 0xCC101820);
         for (int index = 0; index < lines.size(); index++) {
             font.drawStringWithShadow(lines.get(index),
                     x + 10, y + 5 + index * 10, 0xFFFFFF);
         }
+        GlStateManager.enableDepth();
         GlStateManager.popMatrix();
     }
 }

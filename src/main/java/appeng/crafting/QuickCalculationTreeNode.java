@@ -206,7 +206,7 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
     }
 
     private void mergeFluidItems(IItemList<IAEItemStack> copiedItems) {
-        if (grid == null) {
+        if (grid == null || !AE2FluidCraftCompat.isAvailable()) {
             return;
         }
 
@@ -229,8 +229,13 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
                     || requestedOutput.isSameType(item)) {
                 continue;
             }
-            if (copiedItems.findPrecise(item) == null) {
+            IAEItemStack existing = copiedItems.findPrecise(item);
+            if (existing == null) {
                 copiedItems.add(item.copy());
+            } else {
+                // getAvailableItems() is the authoritative view for AE2FC's
+                // virtual fluid entries. Do not retain a stale cached count.
+                existing.setStackSize(item.getStackSize());
             }
         }
     }
