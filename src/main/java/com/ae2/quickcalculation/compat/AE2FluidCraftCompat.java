@@ -1,5 +1,7 @@
 package com.ae2.quickcalculation.compat;
 
+import appeng.api.storage.data.IAEFluidStack;
+import appeng.api.storage.data.IAEItemStack;
 import net.minecraft.item.ItemStack;
 import net.minecraftforge.fml.common.Loader;
 
@@ -27,6 +29,20 @@ public final class AE2FluidCraftCompat {
             return false;
         } catch (RuntimeException ignored) {
             return false;
+        }
+    }
+
+    public static IAEItemStack packFluid(IAEFluidStack fluid) {
+        if (fluid == null || fluid.getStackSize() <= 0L || !isAvailable()) {
+            return null;
+        }
+
+        try {
+            return AE2FluidCraftApi.packFluid(fluid);
+        } catch (LinkageError ignored) {
+            return null;
+        } catch (RuntimeException ignored) {
+            return null;
         }
     }
 }

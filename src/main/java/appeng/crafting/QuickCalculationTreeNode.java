@@ -7,7 +7,9 @@ import appeng.api.networking.crafting.ICraftingPatternDetails;
 import appeng.api.networking.security.IActionSource;
 import appeng.api.networking.storage.IStorageGrid;
 import appeng.api.storage.IMEMonitor;
+import appeng.api.storage.channels.IFluidStorageChannel;
 import appeng.api.storage.channels.IItemStorageChannel;
+import appeng.api.storage.data.IAEFluidStack;
 import appeng.api.storage.data.IAEItemStack;
 import appeng.api.storage.data.IItemList;
 import appeng.me.cluster.implementations.CraftingCPUCluster;
@@ -189,20 +191,55 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
                     key, amount, craftingGrid.canEmitFor(key));
         }
 
-        // Run against a private copy. The native fallback must see the exact
-        // inventory state that CraftingJob supplied, even after a calculation failure.
-        IItemList<IAEItemStack> copiedItems = AEApi.instance().storage()
-                .getStorageChannel(IItemStorageChannel.class).createList();
-        for (IAEItemStack item : inventory.getItemList()) {
-            if (item != null && item.getStackSize() > 0L) {
-                copiedItems.add(item.copy());
-            }
-        }
-        mergeFluidItems(copiedItems);
+        // Use a private, current snapshot for the direct calculator. CraftingJob's
+        // original list is created from NetworkMonitor#getStorageList(), which is
+        // a cached item view and does not reliably contain AE2FC's virtual-fluid
+        // entries. The native fallback still receives the original inventory above.
+        IItemList<IAEItemStack> copiedItems = createCalculationSnapshot(inventory);
         MECraftingInventory calculationInventory =
                 new MECraftingInventory(copiedItems);
         return new CraftingCalculator(craftingGrid, world).calculate(
                 selected, amount, calculationInventory);
+    }
+
+    private IItemList<IAEItemStack> createCalculationSnapshot(
+            MECraftingInventory inventory) {
+        IItemStorageChannel itemChannel = AEApi.instance().storage()
+                .getStorageChannel(IItemStorageChannel.class);
+        IItemList<IAEItemStack> sourceItems = itemChannel.createList();
+
+        boolean readCurrentItems = false;
+        if (grid != null) {
+            IStorageGrid storageGrid = grid.getCache(IStorageGrid.class);
+            if (storageGrid != null) {
+                IMEMonitor<IAEItemStack> itemInventory =
+                        storageGrid.getInventory(itemChannel);
+                if (itemInventory != null) {
+                    itemInventory.getAvailableItems(sourceItems);
+                    readCurrentItems = true;
+                }
+            }
+        }
+
+        if (!readCurrentItems) {
+            for (IAEItemStack item : inventory.getItemList()) {
+                if (item != null && item.getStackSize() > 0L) {
+                    sourceItems.add(item.copy());
+                }
+            }
+        }
+
+        IItemList<IAEItemStack> copiedItems = itemChannel.createList();
+        for (IAEItemStack item : sourceItems) {
+            if (item == null || item.getStackSize() <= 0L
+                    || requestedOutput.isSameType(item)) {
+                continue;
+            }
+            copiedItems.add(item.copy());
+        }
+
+        mergeFluidItems(copiedItems);
+        return copiedItems;
     }
 
     private void mergeFluidItems(IItemList<IAEItemStack> copiedItems) {
@@ -215,27 +252,55 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
             return;
         }
 
-        IItemStorageChannel channel = AEApi.instance().storage()
+        IItemStorageChannel itemChannel = AEApi.instance().storage()
                 .getStorageChannel(IItemStorageChannel.class);
-        IItemList<IAEItemStack> available = channel.createList();
-        IMEMonitor<IAEItemStack> itemInventory = storageGrid.getInventory(channel);
-        if (itemInventory == null) {
+        IItemList<IAEItemStack> available = itemChannel.createList();
+        IMEMonitor<IAEItemStack> itemInventory = storageGrid.getInventory(itemChannel);
+        if (itemInventory != null) {
+            itemInventory.getAvailableItems(available);
+            for (IAEItemStack item : available) {
+                if (item == null || item.getStackSize() <= 0L
+                        || !AE2FluidCraftCompat.isFluidFakeItem(item.getDefinition())
+                        || requestedOutput.isSameType(item)) {
+                    continue;
+                }
+                IAEItemStack existing = copiedItems.findPrecise(item);
+                if (existing == null) {
+                    copiedItems.add(item.copy());
+                } else {
+                    // getAvailableItems() is the authoritative view for AE2FC's
+                    // virtual fluid entries. Do not retain a stale cached count.
+                    existing.setStackSize(item.getStackSize());
+                }
+            }
+        }
+
+        // Read the real fluid channel as well. This is the authoritative source
+        // for fluid amounts; the item-channel bridge is retained for compatibility
+        // with AE2FC versions that expose only its virtual-item monitor there.
+        IFluidStorageChannel fluidChannel = AEApi.instance().storage()
+                .getStorageChannel(IFluidStorageChannel.class);
+        IMEMonitor<IAEFluidStack> fluidInventory =
+                storageGrid.getInventory(fluidChannel);
+        if (fluidInventory == null) {
             return;
         }
-        itemInventory.getAvailableItems(available);
-        for (IAEItemStack item : available) {
-            if (item == null || item.getStackSize() <= 0L
-                    || !AE2FluidCraftCompat.isFluidFakeItem(item.getDefinition())
-                    || requestedOutput.isSameType(item)) {
+        IItemList<IAEFluidStack> fluids = fluidChannel.createList();
+        fluidInventory.getAvailableItems(fluids);
+        for (IAEFluidStack fluid : fluids) {
+            if (fluid == null || fluid.getStackSize() <= 0L) {
                 continue;
             }
-            IAEItemStack existing = copiedItems.findPrecise(item);
+            IAEItemStack fakeFluid = AE2FluidCraftCompat.packFluid(fluid);
+            if (fakeFluid == null || fakeFluid.getStackSize() <= 0L
+                    || requestedOutput.isSameType(fakeFluid)) {
+                continue;
+            }
+            IAEItemStack existing = copiedItems.findPrecise(fakeFluid);
             if (existing == null) {
-                copiedItems.add(item.copy());
+                copiedItems.add(fakeFluid.copy());
             } else {
-                // getAvailableItems() is the authoritative view for AE2FC's
-                // virtual fluid entries. Do not retain a stale cached count.
-                existing.setStackSize(item.getStackSize());
+                existing.setStackSize(fakeFluid.getStackSize());
             }
         }
     }

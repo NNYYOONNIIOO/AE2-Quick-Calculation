@@ -1,5 +1,7 @@
 package com.ae2.quickcalculation.compat;
 
+import appeng.api.storage.data.IAEFluidStack;
+import appeng.api.storage.data.IAEItemStack;
 import com.glodblock.github.common.item.fake.FakeFluids;
 import net.minecraft.item.ItemStack;
 
@@ -14,5 +16,9 @@ final class AE2FluidCraftApi {
 
     static boolean isFluidFakeItem(ItemStack stack) {
         return FakeFluids.isFluidFakeItem(stack);
+    }
+
+    static IAEItemStack packFluid(IAEFluidStack fluid) {
+        return FakeFluids.packFluid2AEDrops(fluid);
     }
 }
