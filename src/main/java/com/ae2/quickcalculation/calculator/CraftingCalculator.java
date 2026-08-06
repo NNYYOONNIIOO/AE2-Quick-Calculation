@@ -1061,16 +1061,21 @@ public final class CraftingCalculator {
 
     private PatternChoice resolvePattern(IAEItemStack key, long amountHint) {
         PatternChoice cached = patternCache.get(key);
-        if (cached != null && (!isFluidKey(key)
-                || cached.external || cached.pattern != null
+        // External storage is mutable during one calculation: an earlier
+        // lookup may have consumed the last copies of this key. Never reuse
+        // an external result from the cache after the ledger changes.
+        if (cached != null && !cached.external && (!isFluidKey(key)
+                || cached.pattern != null
                 || amountHint <= 0L)) {
             return cached;
         }
 
-        if (canEmitFor(key, amountHint)) {
-            PatternChoice external = new PatternChoice(true, null, 0L);
-            patternCache.put(key, external);
-            return external;
+        // ICraftingGrid#canEmitFor only describes whether the network can
+        // emit this type at all. It does not promise an unlimited quantity.
+        // The private inventory ledger is authoritative for the amount that
+        // remains after earlier inputs have been reserved.
+        if (canEmitFor(key, amountHint) && hasAvailable(key)) {
+            return new PatternChoice(true, null, 0L);
         }
 
         ICraftingPatternDetails pattern = null;
@@ -1101,6 +1106,14 @@ public final class CraftingCalculator {
             patternCache.put(key, choice);
         }
         return choice;
+    }
+
+    private boolean hasAvailable(IAEItemStack key) {
+        if (key == null || availableItems == null) {
+            return false;
+        }
+        IAEItemStack available = availableItems.findPrecise(key);
+        return available != null && available.getStackSize() > 0L;
     }
 
     private Collection<ICraftingPatternDetails> getCraftingFor(IAEItemStack key) {

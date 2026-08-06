@@ -46,10 +46,80 @@ public final class CraftingCalculatorStressTest {
         if (!Bootstrap.isRegistered()) {
             Bootstrap.register();
         }
+        boolean missingPlanOnly = false;
+        for (String arg : args) {
+            if ("missing-plan".equals(arg)) {
+                missingPlanOnly = true;
+                break;
+            }
+        }
+        if (missingPlanOnly) {
+            verifyMissingItemsArePreservedInPlan();
+            verifyPartialMissingItemsArePreservedInPlan();
+            System.out.println("CraftingCalculator missing-plan test passed");
+            return;
+        }
         runChain("20k-node chain", 20_000);
         runChain("50k-depth chain", 50_000);
         verifyQuantityOverflowIsRejected();
         System.out.println("CraftingCalculatorStressTest passed");
+    }
+
+    private static void verifyMissingItemsArePreservedInPlan() {
+        Item item = new Item();
+        IAEItemStack input = AEItemStack.fromItemStack(
+                new ItemStack(item, 1, 0));
+        IAEItemStack output = AEItemStack.fromItemStack(
+                new ItemStack(item, 1, 1));
+        ChainPattern pattern = new ChainPattern(output, input);
+        Map<IAEItemStack, ICraftingPatternDetails> byOutput =
+                new HashMap<IAEItemStack, ICraftingPatternDetails>();
+        byOutput.put(output, pattern);
+
+        IItemList<IAEItemStack> empty = AEApi.instance().storage()
+                .getStorageChannel(IItemStorageChannel.class).createList();
+        CraftingCalculator.Result result = new CraftingCalculator(
+                new StressGrid(input, byOutput), null).calculate(
+                pattern, 1000L, new MECraftingInventory(empty));
+
+        require(result.hasMissingItems(), "missing-plan test reported no missing input");
+        IItemList<IAEItemStack> plan = AEApi.instance().storage()
+                .getStorageChannel(IItemStorageChannel.class).createList();
+        result.populatePlan(plan);
+        IAEItemStack missing = plan.findPrecise(input);
+        require(missing != null && missing.getStackSize() == 1000L,
+                "missing-plan test lost the missing input: " + plan);
+    }
+
+    private static void verifyPartialMissingItemsArePreservedInPlan() {
+        Item item = new Item();
+        IAEItemStack input = AEItemStack.fromItemStack(
+                new ItemStack(item, 1, 0));
+        IAEItemStack output = AEItemStack.fromItemStack(
+                new ItemStack(item, 1, 1));
+        ChainPattern pattern = new ChainPattern(output, input);
+        Map<IAEItemStack, ICraftingPatternDetails> byOutput =
+                new HashMap<IAEItemStack, ICraftingPatternDetails>();
+        byOutput.put(output, pattern);
+
+        IItemList<IAEItemStack> partial = AEApi.instance().storage()
+                .getStorageChannel(IItemStorageChannel.class).createList();
+        partial.add(input.copy().setStackSize(64L));
+        CraftingCalculator.Result result = new CraftingCalculator(
+                new StressGrid(input, byOutput), null).calculate(
+                pattern, 1000L, new MECraftingInventory(partial));
+
+        IAEItemStack missing = result.getMissingItems().findPrecise(input);
+        require(missing != null && missing.getStackSize() == 936L,
+                "partial-missing test reported the wrong deficit: "
+                        + result.getMissingItems());
+        IItemList<IAEItemStack> plan = AEApi.instance().storage()
+                .getStorageChannel(IItemStorageChannel.class).createList();
+        result.populatePlan(plan);
+        IAEItemStack planned = plan.findPrecise(input);
+        require(planned != null && planned.getStackSize() == 1000L,
+                "partial-missing test lost the used plus missing total: "
+                        + plan);
     }
 
     private static void runChain(String label, int depth) {
@@ -228,7 +298,7 @@ public final class CraftingCalculatorStressTest {
 
         @Override
         public boolean canEmitFor(IAEItemStack what) {
-            return emitted.isSameType(what);
+            return emitted != null && emitted.isSameType(what);
         }
 
         @Override
