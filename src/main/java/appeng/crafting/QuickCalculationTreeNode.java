@@ -6,13 +6,14 @@ import appeng.api.networking.crafting.ICraftingGrid;
 import appeng.api.networking.crafting.ICraftingPatternDetails;
 import appeng.api.networking.security.IActionSource;
 import appeng.api.networking.storage.IStorageGrid;
+import appeng.api.storage.IMEMonitor;
 import appeng.api.storage.channels.IItemStorageChannel;
 import appeng.api.storage.data.IAEItemStack;
 import appeng.api.storage.data.IItemList;
 import appeng.me.cluster.implementations.CraftingCPUCluster;
 import com.ae2.quickcalculation.calculator.CraftingCalculator;
 import com.ae2.quickcalculation.AE2QuickCalculation;
-import com.glodblock.github.common.item.fake.FakeFluids;
+import com.ae2.quickcalculation.compat.AE2FluidCraftCompat;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.world.World;
 import com.ae2.quickcalculation.network.AE2QuickCalculationNetwork;
@@ -67,6 +68,9 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
             if (result.hasMissingItems() && !craftingJob.isSimulation()) {
                 throw new CraftBranchFailure(requestedOutput, amount);
             }
+            reportTerminalStatus(source, result.isCycleOptimized()
+                    ? AE2QuickCalculation.STATUS_OPTIMIZED_CYCLE
+                    : AE2QuickCalculation.STATUS_OPTIMIZED);
             return result.getOutput().copy();
         } catch (CraftingCalculator.QuantityLimitException failure) {
             result = null;
@@ -214,10 +218,14 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
         IItemStorageChannel channel = AEApi.instance().storage()
                 .getStorageChannel(IItemStorageChannel.class);
         IItemList<IAEItemStack> available = channel.createList();
-        storageGrid.getInventory(channel).getAvailableItems(available);
+        IMEMonitor<IAEItemStack> itemInventory = storageGrid.getInventory(channel);
+        if (itemInventory == null) {
+            return;
+        }
+        itemInventory.getAvailableItems(available);
         for (IAEItemStack item : available) {
             if (item == null || item.getStackSize() <= 0L
-                    || !FakeFluids.isFluidFakeItem(item.getDefinition())
+                    || !AE2FluidCraftCompat.isFluidFakeItem(item.getDefinition())
                     || requestedOutput.isSameType(item)) {
                 continue;
             }

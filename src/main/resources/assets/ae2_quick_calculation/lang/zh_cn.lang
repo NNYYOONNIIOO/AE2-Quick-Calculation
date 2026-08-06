@@ -1,4 +1,6 @@
 ae2_quick_calculation.status.active=AE2 快速计算：已使用优化计算
+ae2_quick_calculation.status.optimized=AE2 快速计算：优化计算已完成
+ae2_quick_calculation.status.optimized.cycle=AE2 快速计算：已完成自增殖循环优化计算
 ae2_quick_calculation.status.fallback=AE2 快速计算：已回退到 AE2 原生计算
 ae2_quick_calculation.status.fallback.unsupported=AE2 快速计算：已回退到 AE2 原生计算（样板语义不受支持）
 ae2_quick_calculation.status.fallback.substitution=AE2 快速计算：已回退到 AE2 原生计算（替代输入或容器语义不受支持）

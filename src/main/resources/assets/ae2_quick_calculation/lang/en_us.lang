@@ -1,4 +1,6 @@
 ae2_quick_calculation.status.active=AE2 Quick Calculation: optimized calculation active
+ae2_quick_calculation.status.optimized=AE2 Quick Calculation: optimized calculation completed
+ae2_quick_calculation.status.optimized.cycle=AE2 Quick Calculation: productive cycle optimization completed
 ae2_quick_calculation.status.fallback=AE2 Quick Calculation: using native AE2 calculation
 ae2_quick_calculation.status.fallback.unsupported=AE2 Quick Calculation: native AE2 calculation (unsupported pattern semantics)
 ae2_quick_calculation.status.fallback.substitution=AE2 Quick Calculation: native AE2 calculation (unsupported substitution/container semantics)

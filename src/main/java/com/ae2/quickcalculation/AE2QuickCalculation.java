@@ -15,13 +15,14 @@ import org.apache.logging.log4j.Logger;
         name = AE2QuickCalculation.NAME,
         version = AE2QuickCalculation.VERSION,
         dependencies = "required-after:appliedenergistics2;required-after:mixinbooter;"
-                + "required-after:ae2fc;"
 )
 public final class AE2QuickCalculation {
     public static final String MOD_ID = "ae2_quick_calculation";
     public static final String NAME = "AE2 Quick Calculation";
     public static final String VERSION = "1.0.0";
     public static final String STATUS_ACTIVE = MOD_ID + ".status.active";
+    public static final String STATUS_OPTIMIZED = MOD_ID + ".status.optimized";
+    public static final String STATUS_OPTIMIZED_CYCLE = MOD_ID + ".status.optimized.cycle";
     public static final String STATUS_FALLBACK = MOD_ID + ".status.fallback";
     public static final String STATUS_FALLBACK_UNSUPPORTED =
             MOD_ID + ".status.fallback.unsupported";

@@ -93,7 +93,8 @@ public final class CraftingCalculator {
         long requested = Math.max(0L, requestedAmount);
         long crafts = divideRoundUp(requested, output.getStackSize());
         PatternInfo rootInfo = getPatternInfo(rootPattern);
-        if (!tryCraftRootCycle(rootInfo, requested)) {
+        boolean cycleOptimized = tryCraftRootCycle(rootInfo, requested);
+        if (!cycleOptimized) {
             craftPattern(rootInfo, crafts);
         }
 
@@ -103,7 +104,7 @@ public final class CraftingCalculator {
         IAEItemStack finalOutput = output.copy();
         finalOutput.setStackSize(resultAmount);
         return new Result(finalOutput, bytes, usedItems, missingItems,
-                emittedItems, patternTimes);
+                emittedItems, patternTimes, cycleOptimized);
     }
 
     private void craftPattern(PatternInfo rootPattern, long crafts) {
@@ -129,8 +130,12 @@ public final class CraftingCalculator {
                             continuation.reusableInput, continuation.requiredUses);
                 } else {
                     long acquired = extract(continuation.input, continuation.required);
-                    if (continuation.reusable && acquired > 0L) {
-                        insertInternal(continuation.container, acquired);
+                    if (continuation.returnContainer && acquired > 0L) {
+                        if (continuation.deferContainerReturn) {
+                            addPendingReturn(frame, continuation.container, acquired);
+                        } else {
+                            insertInternal(continuation.container, acquired);
+                        }
                     }
                 }
                 continue;
@@ -159,6 +164,21 @@ public final class CraftingCalculator {
                         InputOption option = selectCraftingOption(input);
                         frame.continuation = InputContinuation.normal(
                                 option.key, null, missing, false);
+                        scheduleRequest(option.key, missing, frames);
+                    }
+                } else if (!input.reusable) {
+                    // A non-identical container is returned once for every
+                    // consumed input. It is not a reusable catalyst and must
+                    // never be reserved once per craft as a parallel copy.
+                    long missing = acquireNormalInput(input, totalRequired);
+                    long acquired = totalRequired - missing;
+                    if (acquired > 0L) {
+                        addPendingReturn(frame, input.container, acquired);
+                    }
+                    if (missing > 0L) {
+                        InputOption option = selectCraftingOption(input);
+                        frame.continuation = InputContinuation.returned(
+                                option.key, input.container, missing);
                         scheduleRequest(option.key, missing, frames);
                     }
                 } else {
@@ -194,6 +214,11 @@ public final class CraftingCalculator {
                 }
                 continue;
             }
+
+            for (PendingReturn pending : frame.pendingReturns) {
+                insertInternal(pending.stack, pending.amount);
+            }
+            frame.pendingReturns.clear();
 
             for (OutputInfo output : frame.pattern.outputs) {
                 if (isPatternReturnedCatalyst(frame.pattern, output.output)) {
@@ -868,6 +893,9 @@ public final class CraftingCalculator {
                 returnedByPattern = true;
             }
             DurabilityInfo durability = container == null ? null : container.durability;
+            boolean reusable = container != null
+                    && durability == null
+                    && sameReusableContainer(input, container.stack);
             int[] slots = findInputSlots(pattern, input);
             int slot = slots.length == 0 ? -1 : slots[0];
             inputs.add(new InputInfo(
@@ -878,6 +906,7 @@ public final class CraftingCalculator {
                     container == null ? null : container.stack,
                     durability,
                     returnedByPattern,
+                    reusable,
                     buildInputOptions(pattern, input, slots, container, durability)));
         }
 
@@ -1101,6 +1130,23 @@ public final class CraftingCalculator {
         return taken;
     }
 
+    private void addPendingReturn(PatternFrame frame,
+                                  IAEItemStack stack,
+                                  long amount) {
+        if (frame == null || stack == null || amount <= 0L) {
+            return;
+        }
+        for (PendingReturn pending : frame.pendingReturns) {
+            if (sameKey(pending.stack, stack)) {
+                pending.amount = checkedAdd(pending.amount, amount);
+                return;
+            }
+        }
+        IAEItemStack copy = stack.copy();
+        copy.setStackSize(1L);
+        frame.pendingReturns.add(new PendingReturn(copy, amount));
+    }
+
     private void insertInternal(IAEItemStack key, long count) {
         if (count > 0L) {
             addCount(internalItems, key, count);
@@ -1145,16 +1191,17 @@ public final class CraftingCalculator {
 
             ContainerInfo container = inspectContainer(input);
             if (item.hasContainerItem(input.getDefinition()) && container == null) {
-                // Treat an unrecognised container transition as consumed input.
-                // That would be incorrect for both crafting and processing
-                // patterns, so leave it to AE2's native implementation.
+                // Treat an unrecognised container transition as consumed input
+                // would be incorrect, so leave it to AE2's native path.
                 return false;
             }
 
-            if (container != null && !sameReusableContainer(input, container.stack)) {
-                // This calculator only supports a catalyst that returns the
-                // same item. A different container belongs to the parent
-                // process in AE2 and must not be silently reused here.
+            if (container != null
+                    && !sameReusableContainer(input, container.stack)
+                    && !pattern.isCraftable()) {
+                // AE2's 1.12 processing executor does not return container
+                // items after a processing operation. Vanilla crafting does,
+                // so only that path can safely provide a different container.
                 return false;
             }
 
@@ -1476,6 +1523,7 @@ public final class CraftingCalculator {
         private final IAEItemStack container;
         private final DurabilityInfo durability;
         private final boolean returnedByPattern;
+        private final boolean reusable;
         private final InputOption[] options;
 
         private InputInfo(ICraftingPatternDetails pattern,
@@ -1485,6 +1533,7 @@ public final class CraftingCalculator {
                           IAEItemStack container,
                           DurabilityInfo durability,
                           boolean returnedByPattern,
+                          boolean reusable,
                           InputOption[] options) {
             this.pattern = pattern;
             this.slot = slot;
@@ -1495,6 +1544,7 @@ public final class CraftingCalculator {
             this.container = container;
             this.durability = durability;
             this.returnedByPattern = returnedByPattern;
+            this.reusable = reusable;
             this.options = options;
         }
     }
@@ -1557,6 +1607,8 @@ public final class CraftingCalculator {
         private final PatternInfo pattern;
         private final long crafts;
         private final IAEItemStack outputKey;
+        private final List<PendingReturn> pendingReturns =
+                new ArrayList<PendingReturn>();
         private int inputIndex;
         private boolean started;
         private InputContinuation continuation;
@@ -1570,11 +1622,22 @@ public final class CraftingCalculator {
         }
     }
 
+    private static final class PendingReturn {
+        private final IAEItemStack stack;
+        private long amount;
+
+        private PendingReturn(IAEItemStack stack, long amount) {
+            this.stack = stack;
+            this.amount = amount;
+        }
+    }
+
     private static final class InputContinuation {
         private final IAEItemStack input;
         private final IAEItemStack container;
         private final long required;
-        private final boolean reusable;
+        private final boolean returnContainer;
+        private final boolean deferContainerReturn;
         private final InputInfo reusableInput;
         private final long requiredUses;
         private final boolean durable;
@@ -1582,14 +1645,16 @@ public final class CraftingCalculator {
         private InputContinuation(IAEItemStack input,
                                   IAEItemStack container,
                                   long required,
-                                  boolean reusable,
+                                  boolean returnContainer,
+                                  boolean deferContainerReturn,
                                   InputInfo reusableInput,
                                   long requiredUses,
                                   boolean durable) {
             this.input = input;
             this.container = container;
             this.required = required;
-            this.reusable = reusable;
+            this.returnContainer = returnContainer;
+            this.deferContainerReturn = deferContainerReturn;
             this.reusableInput = reusableInput;
             this.requiredUses = requiredUses;
             this.durable = durable;
@@ -1598,14 +1663,21 @@ public final class CraftingCalculator {
         private static InputContinuation normal(IAEItemStack input,
                                                 IAEItemStack container,
                                                 long required,
-                                                boolean reusable) {
-            return new InputContinuation(input, container, required, reusable,
+                                                boolean returnContainer) {
+            return new InputContinuation(input, container, required, returnContainer, false,
+                    null, 0L, false);
+        }
+
+        private static InputContinuation returned(IAEItemStack input,
+                                                  IAEItemStack container,
+                                                  long required) {
+            return new InputContinuation(input, container, required, true, true,
                     null, 0L, false);
         }
 
         private static InputContinuation durable(InputInfo input,
                                                  long requiredUses) {
-            return new InputContinuation(null, null, 0L, false,
+            return new InputContinuation(null, null, 0L, false, false,
                     input, requiredUses, true);
         }
     }
@@ -1632,19 +1704,22 @@ public final class CraftingCalculator {
         private final IItemList<IAEItemStack> missingItems;
         private final IItemList<IAEItemStack> emittedItems;
         private final Map<ICraftingPatternDetails, Long> patternTimes;
+        private final boolean cycleOptimized;
 
         private Result(IAEItemStack output,
                        long bytes,
                        IItemList<IAEItemStack> usedItems,
                        IItemList<IAEItemStack> missingItems,
                        IItemList<IAEItemStack> emittedItems,
-                       Map<ICraftingPatternDetails, Long> patternTimes) {
+                       Map<ICraftingPatternDetails, Long> patternTimes,
+                       boolean cycleOptimized) {
             this.output = output;
             this.bytes = bytes;
             this.usedItems = usedItems;
             this.missingItems = missingItems;
             this.emittedItems = emittedItems;
             this.patternTimes = new LinkedHashMap<ICraftingPatternDetails, Long>(patternTimes);
+            this.cycleOptimized = cycleOptimized;
         }
 
         public static Result direct(IAEItemStack output, long amount, boolean external) {
@@ -1665,7 +1740,7 @@ public final class CraftingCalculator {
             IAEItemStack finalOutput = key.copy();
             finalOutput.setStackSize(amount);
             return new Result(finalOutput, amount, used, missing, emitted,
-                    new LinkedHashMap<ICraftingPatternDetails, Long>());
+                    new LinkedHashMap<ICraftingPatternDetails, Long>(), false);
         }
 
         public boolean hasMissingItems() {
@@ -1674,6 +1749,10 @@ public final class CraftingCalculator {
 
         public IAEItemStack getOutput() {
             return output;
+        }
+
+        public boolean isCycleOptimized() {
+            return cycleOptimized;
         }
 
         public long getBytes() {

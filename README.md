@@ -66,7 +66,11 @@ Install the final JAR together with:
 
 - AE2 Unofficial Extended Life for Minecraft 1.12.2
 - MixinBooter 11.x for Minecraft 1.12.2
-- AE2 Fluid Crafting (AE2FC) for Minecraft 1.12.2
+
+Optional integration:
+
+- AE2 Fluid Crafting (AE2FC) for Minecraft 1.12.2, when fluid crafting or
+  fluid processing patterns are used
 
 The build uses the requested AE2 dependency:
 
@@ -79,13 +83,23 @@ MixinBooter is resolved from the CleanroomMC Maven repository and is not
 bundled into the final mod JAR.
 
 Fluid crafting and fluid processing patterns are an AE2FC integration. AE2FC
-provides the fluid fake-item bridge used by the 1.12.2 item crafting API; the
-direct calculator preserves those stacks and lets AE2FC handle extraction,
-injection, and execution.
+provides the fluid fake-item bridge used by the 1.12.2 item crafting API. The
+calculator detects that bridge without linking AE2FC classes at runtime, so
+AE2FC remains optional. When present, its fake fluid stacks are included in
+the planning snapshot and AE2FC continues to handle extraction, injection, and
+execution.
+
+Vanilla crafting inputs with a different container return are also supported:
+an input such as a filled bucket is consumed once per craft and its empty
+container is made available to later dependency calculations in the same job.
+The native CPU remains responsible for returning the container during actual
+craft execution.
 
 When a job uses the direct calculator, the requesting player sees a one-time
 localized status overlay drawn above the active GUI, including the crafting
-CPU management screen. English and Simplified Chinese are included. Unsupported
+CPU management screen. The overlay distinguishes ordinary optimization,
+productive-cycle optimization, and native fallback reasons. English and
+Simplified Chinese are included. Unsupported
 pattern semantics and runtime failures show a one-time native AE2 fallback
 message instead. Quantity overflow is reported separately, is not sent into
 native recursive calculation, and leaves a non-requestable missing entry in the
