@@ -167,24 +167,29 @@ public final class CraftingCalculator {
                     // from reserving one catalyst per craft.
                     long parallelTarget = Math.min(totalRequired,
                             saturatedMultiply(input.perCraft, reusableParallelism()));
-                    long acquiredForBatch = acquireNormalInput(input, parallelTarget);
+                    long missingForParallelBatch = acquireNormalInput(
+                            input, parallelTarget);
+                    long acquiredForBatch = parallelTarget - missingForParallelBatch;
                     if (acquiredForBatch > 0L) {
                         insertInternal(input.container, acquiredForBatch);
                     }
-
-                    long missingForParallelBatch = parallelTarget > acquiredForBatch
-                            ? parallelTarget - acquiredForBatch
-                            : 0L;
 
                     // Keep enough copies for the useful parallel batch. The
                     // bound comes from the network CPUs instead of a fixed
                     // one-item or whole-order request.
                     if (missingForParallelBatch > 0L) {
                         InputOption option = selectCraftingOption(input);
-                        frame.continuation = InputContinuation.normal(
-                                option.key, option.container,
-                                missingForParallelBatch, true);
-                        scheduleRequest(option.key, missingForParallelBatch, frames);
+                        PatternChoice choice = resolvePattern(option.key);
+                        long minimumCopies = Math.min(totalRequired, input.perCraft);
+                        long requestAmount = choice.external || choice.pattern != null
+                                ? missingForParallelBatch
+                                : Math.max(0L, minimumCopies - acquiredForBatch);
+                        if (requestAmount > 0L) {
+                            frame.continuation = InputContinuation.normal(
+                                    option.key, option.container,
+                                    requestAmount, true);
+                            scheduleRequest(option.key, requestAmount, frames);
+                        }
                     }
                 }
                 continue;
@@ -863,7 +868,8 @@ public final class CraftingCalculator {
                 returnedByPattern = true;
             }
             DurabilityInfo durability = container == null ? null : container.durability;
-            int slot = findInputSlot(pattern, input);
+            int[] slots = findInputSlots(pattern, input);
+            int slot = slots.length == 0 ? -1 : slots[0];
             inputs.add(new InputInfo(
                     pattern,
                     slot,
@@ -872,7 +878,7 @@ public final class CraftingCalculator {
                     container == null ? null : container.stack,
                     durability,
                     returnedByPattern,
-                    buildInputOptions(pattern, input, slot, container, durability)));
+                    buildInputOptions(pattern, input, slots, container, durability)));
         }
 
         PatternInfo info = new PatternInfo(
@@ -902,7 +908,7 @@ public final class CraftingCalculator {
 
     private InputOption[] buildInputOptions(ICraftingPatternDetails pattern,
                                              IAEItemStack input,
-                                             int slot,
+                                             int[] slots,
                                              ContainerInfo primaryContainer,
                                              DurabilityInfo primaryDurability) {
         List<InputOption> options = new ArrayList<InputOption>();
@@ -914,25 +920,65 @@ public final class CraftingCalculator {
             return options.toArray(new InputOption[options.size()]);
         }
 
-        if (slot < 0 || primaryContainer != null || primaryDurability != null
+        // ICraftingPatternDetails has a default empty substitute list. A
+        // number of integrations set canSubstitute() from the shared AE2
+        // pattern flag but do not expose ingredient candidates. In that case
+        // the encoded input is still a valid exact input and must remain on
+        // the direct-calculation path.
+        if (slots.length == 0) {
+            return options.toArray(new InputOption[options.size()]);
+        }
+
+        List<IAEItemStack> candidates = new ArrayList<IAEItemStack>();
+        for (int slot : slots) {
+            List<IAEItemStack> slotSubstitutes = pattern.getSubstituteInputs(slot);
+            if (slotSubstitutes == null) {
+                continue;
+            }
+            for (IAEItemStack substitute : slotSubstitutes) {
+                if (substitute == null || substitute.getStackSize() <= 0L) {
+                    continue;
+                }
+                IAEItemStack candidate = substitute.copy().setStackSize(1L);
+                if (candidate.getItem() == null
+                        || !isValidSubstitute(pattern, slots, candidate)) {
+                    continue;
+                }
+
+                boolean duplicate = false;
+                for (IAEItemStack existing : candidates) {
+                    if (sameKey(existing, candidate)) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                if (!duplicate) {
+                    candidates.add(candidate);
+                }
+            }
+        }
+
+        boolean hasAlternative = false;
+        for (IAEItemStack candidate : candidates) {
+            if (!sameKey(input, candidate)) {
+                hasAlternative = true;
+                break;
+            }
+        }
+        if (!hasAlternative) {
+            return options.toArray(new InputOption[options.size()]);
+        }
+
+        if (primaryContainer != null || primaryDurability != null
                 || isDamageableItem(input.getItem())) {
             throw unsupported(FallbackReason.SUBSTITUTION_CONTAINER,
                     "Substitution with a reusable or damageable input is not supported");
         }
 
-        for (IAEItemStack substitute : pattern.getSubstituteInputs(slot)) {
-            if (substitute == null || substitute.getStackSize() <= 0L) {
+        for (IAEItemStack candidate : candidates) {
+            if (sameKey(input, candidate)) {
                 continue;
             }
-            IAEItemStack candidate = substitute.copy().setStackSize(1L);
-            if (candidate.getItem() == null) {
-                continue;
-            }
-            if (!pattern.isValidItemForSlot(slot,
-                    candidate.createItemStack(), world)) {
-                continue;
-            }
-
             ContainerInfo container = inspectContainer(candidate);
             if (container != null || candidate.getItem().hasContainerItem(
                     candidate.getDefinition())
@@ -940,20 +986,22 @@ public final class CraftingCalculator {
                 throw unsupported(FallbackReason.SUBSTITUTION_CONTAINER,
                         "Substitution candidate has unsupported container semantics");
             }
-
-            boolean duplicate = false;
-            for (InputOption existing : options) {
-                if (existing.key.isSameType(candidate)) {
-                    duplicate = true;
-                    break;
-                }
-            }
-            if (!duplicate) {
-                options.add(new InputOption(candidate, null, null));
-            }
+            options.add(new InputOption(candidate, null, null));
         }
 
         return options.toArray(new InputOption[options.size()]);
+    }
+
+    private boolean isValidSubstitute(ICraftingPatternDetails pattern,
+                                      int[] slots,
+                                      IAEItemStack candidate) {
+        ItemStack stack = candidate.createItemStack();
+        for (int slot : slots) {
+            if (pattern.isValidItemForSlot(slot, stack, world)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private PatternChoice resolvePattern(IAEItemStack key) {
@@ -1161,25 +1209,40 @@ public final class CraftingCalculator {
         return stack == null ? null : new ContainerInfo(stack, durability);
     }
 
-    private static int findInputSlot(ICraftingPatternDetails pattern,
-                                     IAEItemStack condensedInput) {
+    private static int[] findInputSlots(ICraftingPatternDetails pattern,
+                                         IAEItemStack condensedInput) {
         IAEItemStack[] inputs = pattern.getInputs();
         if (inputs == null) {
-            return -1;
+            return new int[0];
         }
+        List<Integer> slots = new ArrayList<Integer>();
         for (int index = 0; index < inputs.length; index++) {
             IAEItemStack input = inputs[index];
             if (input != null && sameItemAndTags(input, condensedInput)) {
-                return index;
+                slots.add(index);
             }
         }
-        return -1;
+        int[] result = new int[slots.size()];
+        for (int index = 0; index < slots.size(); index++) {
+            result[index] = slots.get(index);
+        }
+        return result;
     }
 
     private static boolean sameItemAndTags(IAEItemStack left,
                                            IAEItemStack right) {
-        return left != null && right != null
-                && left.getItem() == right.getItem()
+        if (left == null || right == null) {
+            return false;
+        }
+        if (left.isSameType(right)) {
+            return true;
+        }
+        // AE2 deliberately treats damageable items fuzzily when resolving a
+        // crafting slot. Preserve that behavior only for damageable items;
+        // silently ignoring metadata on ordinary items can select a different
+        // slot or a different fluid fake item.
+        return left.getItem() == right.getItem()
+                && isDamageableItem(left.getItem())
                 && ItemStack.areItemStackTagsEqual(
                         left.copy().setStackSize(1).createItemStack(),
                         right.copy().setStackSize(1).createItemStack());

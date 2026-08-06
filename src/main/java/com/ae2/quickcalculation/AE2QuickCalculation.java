@@ -15,6 +15,7 @@ import org.apache.logging.log4j.Logger;
         name = AE2QuickCalculation.NAME,
         version = AE2QuickCalculation.VERSION,
         dependencies = "required-after:appliedenergistics2;required-after:mixinbooter;"
+                + "required-after:ae2fc;"
 )
 public final class AE2QuickCalculation {
     public static final String MOD_ID = "ae2_quick_calculation";

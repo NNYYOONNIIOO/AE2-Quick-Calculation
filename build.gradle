@@ -68,6 +68,7 @@ dependencies {
     minecraft 'net.minecraftforge:forge:1.12.2-14.23.5.2859'
 
     implementation fg.deobf("curse.maven:ae2-extended-life-570458:6302098")
+    implementation fg.deobf("curse.maven:ae2fluidcraft-rework-unofficial-1404390:7742544")
 
     def mixin = 'zone.rong:mixinbooter:11.2'
     implementation(mixin) {

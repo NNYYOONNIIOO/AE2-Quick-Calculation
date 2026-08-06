@@ -38,7 +38,8 @@ public abstract class CraftingJobMixin {
                     (CraftingJob) (Object) this,
                     output,
                     world,
-                    source);
+                    source,
+                    grid);
         }
     }
 }

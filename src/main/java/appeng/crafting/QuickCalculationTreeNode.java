@@ -1,15 +1,18 @@
 package appeng.crafting;
 
 import appeng.api.AEApi;
+import appeng.api.networking.IGrid;
 import appeng.api.networking.crafting.ICraftingGrid;
 import appeng.api.networking.crafting.ICraftingPatternDetails;
 import appeng.api.networking.security.IActionSource;
+import appeng.api.networking.storage.IStorageGrid;
 import appeng.api.storage.channels.IItemStorageChannel;
 import appeng.api.storage.data.IAEItemStack;
 import appeng.api.storage.data.IItemList;
 import appeng.me.cluster.implementations.CraftingCPUCluster;
 import com.ae2.quickcalculation.calculator.CraftingCalculator;
 import com.ae2.quickcalculation.AE2QuickCalculation;
+import com.glodblock.github.common.item.fake.FakeFluids;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.world.World;
 import com.ae2.quickcalculation.network.AE2QuickCalculationNetwork;
@@ -28,6 +31,7 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
     private final CraftingJob craftingJob;
     private final IAEItemStack requestedOutput;
     private final World world;
+    private final IGrid grid;
     private boolean nativeFallback;
     private boolean startStatusReported;
     private boolean terminalStatusReported;
@@ -39,12 +43,14 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
                                     CraftingJob craftingJob,
                                     IAEItemStack requestedOutput,
                                     World world,
-                                    IActionSource source) {
+                                    IActionSource source,
+                                    IGrid grid) {
         super(craftingGrid, craftingJob, requestedOutput, null, -1, 0);
         this.craftingGrid = craftingGrid;
         this.craftingJob = craftingJob;
         this.requestedOutput = requestedOutput.copy();
         this.world = world;
+        this.grid = grid;
     }
 
     @Override
@@ -188,10 +194,37 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
                 copiedItems.add(item.copy());
             }
         }
+        mergeFluidItems(copiedItems);
         MECraftingInventory calculationInventory =
                 new MECraftingInventory(copiedItems);
         return new CraftingCalculator(craftingGrid, world).calculate(
                 selected, amount, calculationInventory);
+    }
+
+    private void mergeFluidItems(IItemList<IAEItemStack> copiedItems) {
+        if (grid == null) {
+            return;
+        }
+
+        IStorageGrid storageGrid = grid.getCache(IStorageGrid.class);
+        if (storageGrid == null) {
+            return;
+        }
+
+        IItemStorageChannel channel = AEApi.instance().storage()
+                .getStorageChannel(IItemStorageChannel.class);
+        IItemList<IAEItemStack> available = channel.createList();
+        storageGrid.getInventory(channel).getAvailableItems(available);
+        for (IAEItemStack item : available) {
+            if (item == null || item.getStackSize() <= 0L
+                    || !FakeFluids.isFluidFakeItem(item.getDefinition())
+                    || requestedOutput.isSameType(item)) {
+                continue;
+            }
+            if (copiedItems.findPrecise(item) == null) {
+                copiedItems.add(item.copy());
+            }
+        }
     }
 
     private void reportStartStatus(IActionSource source) {

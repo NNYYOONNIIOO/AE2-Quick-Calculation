@@ -66,15 +66,22 @@ Install the final JAR together with:
 
 - AE2 Unofficial Extended Life for Minecraft 1.12.2
 - MixinBooter 11.x for Minecraft 1.12.2
+- AE2 Fluid Crafting (AE2FC) for Minecraft 1.12.2
 
 The build uses the requested AE2 dependency:
 
 ```groovy
 implementation fg.deobf("curse.maven:ae2-extended-life-570458:6302098")
+implementation fg.deobf("curse.maven:ae2fluidcraft-rework-unofficial-1404390:7742544")
 ```
 
 MixinBooter is resolved from the CleanroomMC Maven repository and is not
 bundled into the final mod JAR.
+
+Fluid crafting and fluid processing patterns are an AE2FC integration. AE2FC
+provides the fluid fake-item bridge used by the 1.12.2 item crafting API; the
+direct calculator preserves those stacks and lets AE2FC handle extraction,
+injection, and execution.
 
 When a job uses the direct calculator, the requesting player sees a one-time
 localized status overlay drawn above the active GUI, including the crafting
