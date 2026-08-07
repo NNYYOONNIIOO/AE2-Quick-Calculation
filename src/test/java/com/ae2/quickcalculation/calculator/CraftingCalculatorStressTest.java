@@ -56,12 +56,14 @@ public final class CraftingCalculatorStressTest {
         if (missingPlanOnly) {
             verifyMissingItemsArePreservedInPlan();
             verifyPartialMissingItemsArePreservedInPlan();
+            verifyPackagedAutoContainerInputsAreConsumed();
             System.out.println("CraftingCalculator missing-plan test passed");
             return;
         }
         runChain("20k-node chain", 20_000);
         runChain("50k-depth chain", 50_000);
         verifyQuantityOverflowIsRejected();
+        verifyPackagedAutoContainerInputsAreConsumed();
         System.out.println("CraftingCalculatorStressTest passed");
     }
 
@@ -200,6 +202,45 @@ public final class CraftingCalculatorStressTest {
         }
     }
 
+    private static void verifyPackagedAutoContainerInputsAreConsumed() {
+        Item returnedContainer = new Item();
+        Item consumedContainer = new ConsumedContainerItem(returnedContainer);
+        Item packageItem = new Item();
+        Item outputItem = new Item();
+
+        IAEItemStack packageInput = AEItemStack.fromItemStack(
+                new ItemStack(consumedContainer, 1, 0));
+        IAEItemStack packageOutput = AEItemStack.fromItemStack(
+                new ItemStack(packageItem, 1, 0));
+        IAEItemStack finalOutput = AEItemStack.fromItemStack(
+                new ItemStack(outputItem, 1, 0));
+
+        ICraftingPatternDetails packagePattern =
+                new thelm.packagedauto.integration.appeng.recipe.PackageCraftingPatternHelper(
+                        packageInput, packageOutput);
+        ChainPattern rootPattern = new ChainPattern(finalOutput, packageOutput);
+        Map<IAEItemStack, ICraftingPatternDetails> byOutput =
+                new HashMap<IAEItemStack, ICraftingPatternDetails>();
+        byOutput.put(packageOutput, packagePattern);
+        byOutput.put(finalOutput, rootPattern);
+
+        IItemList<IAEItemStack> stock = AEApi.instance().storage()
+                .getStorageChannel(IItemStorageChannel.class).createList();
+        stock.add(packageInput.copy().setStackSize(5L));
+        CraftingCalculator.Result result = new CraftingCalculator(
+                new StressGrid(null, byOutput), null).calculate(
+                rootPattern, 5L, new MECraftingInventory(stock));
+
+        require(!result.hasMissingItems(),
+                "PackagedAuto package pattern reported missing inputs");
+        IAEItemStack consumed = result.getUsedItems().findPrecise(packageInput);
+        require(consumed != null && consumed.getStackSize() == 5L,
+                "PackagedAuto package input was not consumed exactly once per craft");
+        require(result.getUsedItems().findPrecise(AEItemStack.fromItemStack(
+                new ItemStack(returnedContainer, 1, 0))) == null,
+                "PackagedAuto package pattern incorrectly returned a container item");
+    }
+
     private static String formatMillis(long nanos) {
         return String.format("%.3f", nanos / 1_000_000.0D);
     }
@@ -271,6 +312,24 @@ public final class CraftingCalculatorStressTest {
 
         @Override
         public void setPriority(int priority) {
+        }
+    }
+
+    private static final class ConsumedContainerItem extends Item {
+        private final Item returnedContainer;
+
+        private ConsumedContainerItem(Item returnedContainer) {
+            this.returnedContainer = returnedContainer;
+        }
+
+        @Override
+        public boolean hasContainerItem(ItemStack stack) {
+            return true;
+        }
+
+        @Override
+        public ItemStack getContainerItem(ItemStack stack) {
+            return new ItemStack(returnedContainer);
         }
     }
 

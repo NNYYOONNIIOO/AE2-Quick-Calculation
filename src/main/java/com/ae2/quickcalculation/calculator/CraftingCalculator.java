@@ -18,6 +18,7 @@ import appeng.util.Platform;
 import appeng.util.item.AEItemStack;
 import com.ae2.quickcalculation.AE2QuickCalculation;
 import com.ae2.quickcalculation.compat.AE2FluidCraftCompat;
+import com.ae2.quickcalculation.compat.PackagedAutoCompat;
 import net.minecraft.inventory.InventoryCrafting;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
@@ -1040,6 +1041,13 @@ public final class CraftingCalculator {
             }
         }
 
+        boolean packageConsumesInputs = PackagedAutoCompat.consumesAllInputs(pattern);
+        if (packageConsumesInputs) {
+            AE2QuickCalculation.LOGGER.info(
+                    "[QCALC][{}] applying PackagedAuto package input semantics pattern={}",
+                    debugTag, pattern.getClass().getName());
+        }
+
         List<InputInfo> inputs = new ArrayList<InputInfo>();
         IAEItemStack[] condensedInputs = getCalculationInputs(pattern);
         if (condensedInputs == null || condensedInputs.length == 0) {
@@ -1050,7 +1058,9 @@ public final class CraftingCalculator {
             if (input == null || input.getStackSize() <= 0L) {
                 continue;
             }
-            ContainerInfo container = inspectContainer(input);
+            // PackagedAuto's package machine shrinks its input stacks directly.
+            // Container returns and tool damage are not applied by that machine.
+            ContainerInfo container = packageConsumesInputs ? null : inspectContainer(input);
             boolean returnedByPattern = false;
             int[] slots = findInputSlots(pattern, input);
 
@@ -1059,7 +1069,7 @@ public final class CraftingCalculator {
             // the requested result. Read the recipe remainder before looking
             // at pattern outputs so a tool that is returned in a damaged NBT
             // state is not mistaken for a consumed input.
-            if ((container == null || container.durability == null)
+            if (!packageConsumesInputs && (container == null || container.durability == null)
                     && shouldProbeRecipeContainer(input)) {
                 ContainerInfo recipeContainer = inspectRecipeContainer(
                         pattern, input, slots);
@@ -1069,27 +1079,30 @@ public final class CraftingCalculator {
                 }
             }
 
-            IAEItemStack returned = findExactReturnedInput(
-                    patternOutputs, input);
-            if (returned == null) {
-                // Some third-party pattern details expose the clean output
-                // view more accurately than their slot-preserving view.
-                returned = findExactReturnedInput(
-                        getCalculationOutputsFromCondensed(pattern), input);
-            }
-            if (returned != null && (container == null
-                    || (container.durability == null
-                    && sameReusableContainer(input, container.stack)))) {
-                if (container == null) {
-                    container = new ContainerInfo(returned, null);
+            if (!packageConsumesInputs) {
+                IAEItemStack returned = findExactReturnedInput(
+                        patternOutputs, input);
+                if (returned == null) {
+                    // Some third-party pattern details expose the clean output
+                    // view more accurately than their slot-preserving view.
+                    returned = findExactReturnedInput(
+                            getCalculationOutputsFromCondensed(pattern), input);
                 }
-                returnedByPattern = true;
+                if (returned != null && (container == null
+                        || (container.durability == null
+                        && sameReusableContainer(input, container.stack)))) {
+                    if (container == null) {
+                        container = new ContainerInfo(returned, null);
+                    }
+                    returnedByPattern = true;
+                }
             }
 
             // Some tools encode their wear in a numeric NBT field instead of
             // ItemStack damage. Treat the unique, provable input -> output
             // transition as the returned durable container.
-            if (container == null || container.durability == null) {
+            if (!packageConsumesInputs
+                    && (container == null || container.durability == null)) {
                 ContainerInfo nbtContainer = findPatternDurabilityContainer(
                         input, patternOutputs);
                 if (nbtContainer == null) {
@@ -2122,6 +2135,13 @@ public final class CraftingCalculator {
                 primaryContainer == null ? null : primaryContainer.stack,
                 primaryDurability));
 
+        // PackageCraftingPatternHelper reports canSubstitute(), but its source
+        // exposes no substitute candidates and its machine consumes the exact
+        // encoded inputs. Do not call its unsupported slot validator.
+        if (PackagedAutoCompat.consumesAllInputs(pattern)) {
+            return options.toArray(new InputOption[options.size()]);
+        }
+
         if (!pattern.canSubstitute()) {
             return options.toArray(new InputOption[options.size()]);
         }
@@ -2359,6 +2379,12 @@ public final class CraftingCalculator {
         try {
             info = getPatternInfo(candidate);
         } catch (CalculationFallbackException failure) {
+            AE2QuickCalculation.LOGGER.info(
+                    "[QCALC][{}] cycle proof could not parse pattern={} reason={} detail={}",
+                    debugTag,
+                    candidate == null ? "null" : candidate.getClass().getName(),
+                    failure.getReason(),
+                    failure.getMessage());
             return CycleDependencyStatus.UNPROVABLE;
         }
 
@@ -2433,6 +2459,13 @@ public final class CraftingCalculator {
                 try {
                     info = getPatternInfo(candidate);
                 } catch (CalculationFallbackException failure) {
+                    AE2QuickCalculation.LOGGER.info(
+                            "[QCALC][{}] cycle proof dependency could not parse key={} pattern={} reason={} detail={}",
+                            debugTag,
+                            AE2FluidCraftCompat.debugStack(key),
+                            candidate.getClass().getName(),
+                            failure.getReason(),
+                            failure.getMessage());
                     unprovableCandidate = true;
                     continue;
                 }
@@ -2691,6 +2724,7 @@ public final class CraftingCalculator {
         IAEItemStack[] condensedOutputs =
                 getCalculationOutputsFromCondensed(pattern);
 
+        boolean packageConsumesInputs = PackagedAutoCompat.consumesAllInputs(pattern);
         for (IAEItemStack input : inputs) {
             if (input == null || input.getStackSize() <= 0L) {
                 continue;
@@ -2700,8 +2734,9 @@ public final class CraftingCalculator {
                 return false;
             }
 
-            ContainerInfo container = inspectContainer(input);
-            if (container == null || container.durability == null) {
+            ContainerInfo container = packageConsumesInputs ? null : inspectContainer(input);
+            if (!packageConsumesInputs
+                    && (container == null || container.durability == null)) {
                 ContainerInfo nbtContainer = findPatternDurabilityContainer(
                         input, outputs);
                 if (nbtContainer == null) {
@@ -2712,13 +2747,15 @@ public final class CraftingCalculator {
                     container = nbtContainer;
                 }
             }
-            if (item.hasContainerItem(input.getDefinition()) && container == null) {
+            if (!packageConsumesInputs
+                    && item.hasContainerItem(input.getDefinition()) && container == null) {
                 // Treat an unrecognised container transition as consumed input
                 // would be incorrect, so leave it to AE2's native path.
                 return false;
             }
 
-            if (container != null && container.durability == null
+            if (!packageConsumesInputs
+                    && container != null && container.durability == null
                     && !sameReusableContainer(input, container.stack)
                     && !pattern.isCraftable()) {
                 // AE2's 1.12 processing executor does not return container
@@ -2727,14 +2764,15 @@ public final class CraftingCalculator {
                 return false;
             }
 
-            if (isDamageableItem(item)) {
+            if (!packageConsumesInputs && isDamageableItem(item)) {
                 if (container == null || container.durability == null
                         || input.getStackSize() != 1L) {
                     return false;
                 }
             }
 
-            if (container != null && container.durability != null
+            if (!packageConsumesInputs
+                    && container != null && container.durability != null
                     && input.getStackSize() != 1L) {
                 return false;
             }
