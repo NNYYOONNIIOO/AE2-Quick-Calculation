@@ -58,6 +58,7 @@ public final class CraftingCalculatorStressTest {
             verifyPartialMissingItemsArePreservedInPlan();
             verifyPackagedAutoContainerInputsAreConsumed();
             verifyProcessingContainerInputsAreConsumed();
+            verifyConsumedDamageableCraftingInputIsSupported();
             System.out.println("CraftingCalculator missing-plan test passed");
             return;
         }
@@ -66,6 +67,7 @@ public final class CraftingCalculatorStressTest {
         verifyQuantityOverflowIsRejected();
         verifyPackagedAutoContainerInputsAreConsumed();
         verifyProcessingContainerInputsAreConsumed();
+        verifyConsumedDamageableCraftingInputIsSupported();
         System.out.println("CraftingCalculatorStressTest passed");
     }
 
@@ -282,6 +284,43 @@ public final class CraftingCalculatorStressTest {
                 "processing container input was treated as an implicit return");
     }
 
+    private static void verifyConsumedDamageableCraftingInputIsSupported() {
+        Item damageableInputItem = new Item().setMaxDamage(100);
+        Item intermediateItem = new Item();
+        Item outputItem = new Item();
+
+        IAEItemStack damageableInput = AEItemStack.fromItemStack(
+                new ItemStack(damageableInputItem, 1, 0));
+        IAEItemStack intermediate = AEItemStack.fromItemStack(
+                new ItemStack(intermediateItem, 1, 0));
+        IAEItemStack output = AEItemStack.fromItemStack(
+                new ItemStack(outputItem, 1, 0));
+
+        // A damageable ingredient without a crafting remainder is consumed by
+        // AE2 just like any other ingredient. The root makes this pattern run
+        // through recursive cycle preflight before it is selected.
+        ChainPattern consumedToolPattern = new ChainPattern(
+                intermediate, damageableInput, true);
+        ChainPattern rootPattern = new ChainPattern(output, intermediate);
+        Map<IAEItemStack, ICraftingPatternDetails> byOutput =
+                new HashMap<IAEItemStack, ICraftingPatternDetails>();
+        byOutput.put(intermediate, consumedToolPattern);
+        byOutput.put(output, rootPattern);
+
+        IItemList<IAEItemStack> stock = AEApi.instance().storage()
+                .getStorageChannel(IItemStorageChannel.class).createList();
+        stock.add(damageableInput.copy().setStackSize(5L));
+        CraftingCalculator.Result result = new CraftingCalculator(
+                new StressGrid(null, byOutput), null).calculate(
+                rootPattern, 5L, new MECraftingInventory(stock));
+
+        require(!result.hasMissingItems(),
+                "consumed damageable crafting input reported missing items");
+        IAEItemStack consumed = result.getUsedItems().findPrecise(damageableInput);
+        require(consumed != null && consumed.getStackSize() == 5L,
+                "damageable crafting input was not consumed once per craft");
+    }
+
     private static String formatMillis(long nanos) {
         return String.format("%.3f", nanos / 1_000_000.0D);
     }
@@ -295,10 +334,18 @@ public final class CraftingCalculatorStressTest {
     private static final class ChainPattern implements ICraftingPatternDetails {
         private final IAEItemStack output;
         private final IAEItemStack input;
+        private final boolean craftable;
 
         private ChainPattern(IAEItemStack output, IAEItemStack input) {
+            this(output, input, false);
+        }
+
+        private ChainPattern(IAEItemStack output,
+                             IAEItemStack input,
+                             boolean craftable) {
             this.output = output;
             this.input = input;
+            this.craftable = craftable;
         }
 
         @Override
@@ -313,7 +360,7 @@ public final class CraftingCalculatorStressTest {
 
         @Override
         public boolean isCraftable() {
-            return false;
+            return craftable;
         }
 
         @Override

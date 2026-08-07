@@ -2767,13 +2767,9 @@ public final class CraftingCalculator {
                 return false;
             }
 
-            if (isDamageableItem(item)) {
-                if (container == null || container.durability == null
-                        || input.getStackSize() != 1L) {
-                    return false;
-                }
-            }
-
+            // A damageable input without a returned state is consumed by the
+            // recipe. Only an explicit durability transition needs the
+            // one-item restriction used by the batch allocator.
             if (container != null && container.durability != null
                     && input.getStackSize() != 1L) {
                 return false;
