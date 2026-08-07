@@ -39,8 +39,9 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
     private final IAEItemStack requestedOutput;
     private final World world;
     private final IGrid grid;
+    private final String debugTag;
     private boolean nativeFallback;
-    private boolean startStatusReported;
+    private long calculationStartNanos;
     private boolean terminalStatusReported;
     private boolean quantityLimitFailure;
     private long quantityLimitAmount;
@@ -58,6 +59,13 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
         this.requestedOutput = requestedOutput.copy();
         this.world = world;
         this.grid = grid;
+        this.debugTag = "job@" + Integer.toHexString(
+                System.identityHashCode(craftingJob));
+        AE2QuickCalculation.LOGGER.info(
+                "[QCALC][{}] root node created output={} ae2fc={}",
+                debugTag,
+                AE2FluidCraftCompat.debugStack(this.requestedOutput),
+                AE2FluidCraftCompat.isAvailable());
     }
 
     @Override
@@ -69,14 +77,34 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
 
         craftingJob.handlePausing();
         try {
-            reportStartStatus(source);
+            startCalculationTimer();
+            AE2QuickCalculation.LOGGER.info(
+                    "[QCALC][{}] request start amount={} simulation={} output={}",
+                    debugTag,
+                    amount,
+                    craftingJob.isSimulation(),
+                    AE2FluidCraftCompat.debugStack(requestedOutput));
             result = calculate(inventory, amount);
+            AE2QuickCalculation.LOGGER.info(
+                    "[QCALC][{}] result output={} missing={} used={} emitted={} patterns={} bytes={} cycle={}",
+                    debugTag,
+                    AE2FluidCraftCompat.debugStack(result.getOutput()),
+                    AE2FluidCraftCompat.debugList(result.getMissingItems(), false),
+                    AE2FluidCraftCompat.debugList(result.getUsedItems(), false),
+                    AE2FluidCraftCompat.debugList(result.getEmittedItems(), false),
+                    result.getPatternCount(),
+                    result.getBytes(),
+                    result.isCycleOptimized());
             if (result.hasMissingItems() && !craftingJob.isSimulation()) {
+                AE2QuickCalculation.LOGGER.info(
+                        "[QCALC][{}] non-simulation request rejected because missing={}",
+                        debugTag,
+                        AE2FluidCraftCompat.debugList(result.getMissingItems(), false));
                 throw new CraftBranchFailure(requestedOutput, amount);
             }
             reportTerminalStatus(source, result.isCycleOptimized()
-                    ? AE2QuickCalculation.STATUS_OPTIMIZED_CYCLE
-                    : AE2QuickCalculation.STATUS_OPTIMIZED);
+                    ? AE2QuickCalculation.TOAST_OPTIMIZED_CYCLE
+                    : AE2QuickCalculation.TOAST_OPTIMIZED);
             return result.getOutput().copy();
         } catch (CraftingCalculator.QuantityLimitException failure) {
             result = null;
@@ -87,7 +115,7 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
             AE2QuickCalculation.LOGGER.warn(
                     "Quick calculation stopped for {}: {}",
                     requestedOutput, failure.getMessage());
-            reportTerminalStatus(source, AE2QuickCalculation.STATUS_QUANTITY_LIMIT);
+            reportTerminalStatus(source, AE2QuickCalculation.TOAST_QUANTITY_LIMIT);
             throw new CraftingCalculationFailure(requestedOutput, quantityLimitAmount);
         } catch (CraftingCalculator.CalculationFallbackException failure) {
             nativeFallback = true;
@@ -95,6 +123,9 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
             AE2QuickCalculation.LOGGER.warn(
                     "Quick calculation falling back to native crafting for {} [{}]: {}",
                     requestedOutput, failure.getReason(), failure.getMessage());
+            AE2QuickCalculation.LOGGER.info(
+                    "[QCALC][{}] fallback reason={} detail={}",
+                    debugTag, failure.getReason(), failure.getMessage());
             reportTerminalStatus(source,
                     AE2QuickCalculation.statusFor(failure.getReason()));
             return super.request(inventory, amount, source);
@@ -104,7 +135,10 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
             AE2QuickCalculation.LOGGER.warn(
                     "Quick calculation failed for {}, using native crafting",
                     requestedOutput, failure);
-            reportTerminalStatus(source, AE2QuickCalculation.STATUS_RUNTIME_FAILURE);
+            AE2QuickCalculation.LOGGER.info(
+                    "[QCALC][{}] runtime failure type={} detail={}",
+                    debugTag, failure.getClass().getName(), failure.getMessage());
+            reportTerminalStatus(source, AE2QuickCalculation.TOAST_RUNTIME_FAILURE);
             return super.request(inventory, amount, source);
         }
     }
@@ -162,10 +196,20 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
             // This is deliberately a missing entry, never a requestable one:
             // the 1.12.2 long-based CPU API cannot represent the calculation.
             plan.add(unresolved);
+            AE2QuickCalculation.LOGGER.info(
+                    "[QCALC][{}] getPlan quantity-limit unresolved={}",
+                    debugTag, AE2FluidCraftCompat.debugStack(unresolved));
             return;
         }
         if (result != null) {
+            int before = countEntries(plan);
             result.populatePlan(plan);
+            AE2QuickCalculation.LOGGER.info(
+                    "[QCALC][{}] getPlan before={} after={} entries={}",
+                    debugTag,
+                    before,
+                    countEntries(plan),
+                    AE2FluidCraftCompat.debugList(plan, false));
         }
     }
 
@@ -174,7 +218,17 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
         IAEItemStack originalKey = requestedOutput.copy();
         IAEItemStack calculationKey = AE2FluidCraftCompat.normalizeFluidItem(
                 originalKey);
+        AE2QuickCalculation.LOGGER.info(
+                "[QCALC][{}] root key raw={} normalized={}",
+                debugTag,
+                AE2FluidCraftCompat.debugStack(originalKey),
+                AE2FluidCraftCompat.debugStack(calculationKey));
         if (calculationKey == null) {
+            if (AE2FluidCraftCompat.isAvailable()) {
+                throw CraftingCalculator.fallback(
+                        CraftingCalculator.FallbackReason.UNSUPPORTED_PATTERN,
+                        "AE2FC fluid item could not be normalized safely");
+            }
             calculationKey = originalKey;
         }
         long amountHint = calculationKey.getStackSize();
@@ -182,10 +236,36 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
         IAEItemStack key = calculationKey.copy();
 
         ICraftingPatternDetails selected = null;
-        for (ICraftingPatternDetails candidate : getCraftingFor(
-                calculationKey, amountHint)) {
+        Collection<ICraftingPatternDetails> candidates = getCraftingFor(
+                calculationKey, amountHint);
+        AE2QuickCalculation.LOGGER.info(
+                "[QCALC][{}] pattern lookup key={} amountHint={} candidates={}",
+                debugTag,
+                AE2FluidCraftCompat.debugStack(calculationKey),
+                amountHint,
+                candidates.size());
+        int candidateIndex = 0;
+        for (ICraftingPatternDetails candidate : candidates) {
+            IAEItemStack rawPrimary = candidate.getPrimaryOutput();
             IAEItemStack primary = AE2FluidCraftCompat.normalizeFluidItem(
-                    candidate.getPrimaryOutput());
+                    rawPrimary);
+            AE2QuickCalculation.LOGGER.info(
+                    "[QCALC][{}] candidate #{} {} primaryRaw={} primaryNormalized={} inputs={} condensedInputs={} outputs={} condensedOutputs={}",
+                    debugTag,
+                    candidateIndex++,
+                    candidate.getClass().getName(),
+                    AE2FluidCraftCompat.debugStack(rawPrimary),
+                    AE2FluidCraftCompat.debugStack(primary),
+                    debugPatternInputs(candidate),
+                    debugPatternCondensedInputs(candidate),
+                    debugPatternOutputs(candidate),
+                    debugPatternCondensedOutputs(candidate));
+            if (rawPrimary != null && primary == null
+                    && AE2FluidCraftCompat.isAvailable()) {
+                throw CraftingCalculator.fallback(
+                        CraftingCalculator.FallbackReason.UNSUPPORTED_PATTERN,
+                        "AE2FC pattern output could not be normalized safely");
+            }
             if (primary != null && primary.isSameType(calculationKey)) {
                 selected = candidate;
                 break;
@@ -198,9 +278,20 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
         // input from the plan. Prefer the actual pattern; use the external
         // emitter only when no matching pattern exists.
         if (selected == null) {
+            AE2QuickCalculation.LOGGER.info(
+                    "[QCALC][{}] no matching pattern; direct result key={} canEmit={}",
+                    debugTag,
+                    AE2FluidCraftCompat.debugStack(key),
+                    canEmitFor(key, calculationKey, amountHint));
             return CraftingCalculator.Result.direct(
                     key, amount, canEmitFor(key, calculationKey, amountHint));
         }
+
+        AE2QuickCalculation.LOGGER.info(
+                "[QCALC][{}] selected pattern {} for key={}",
+                debugTag,
+                selected.getClass().getName(),
+                AE2FluidCraftCompat.debugStack(key));
 
         // Use a private, current snapshot for the direct calculator. CraftingJob's
         // original list is created from NetworkMonitor#getStorageList(), which is
@@ -209,7 +300,7 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
         IItemList<IAEItemStack> copiedItems = createCalculationSnapshot(inventory);
         MECraftingInventory calculationInventory =
                 new MECraftingInventory(copiedItems);
-        return new CraftingCalculator(craftingGrid, world).calculate(
+        return new CraftingCalculator(craftingGrid, world, debugTag).calculate(
                 selected, amount, calculationInventory);
     }
 
@@ -221,16 +312,10 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
             return true;
         }
 
-        long[] queryAmounts = new long[]{amountHint, 1000L, 1L};
-        for (long queryAmount : queryAmounts) {
-            if (queryAmount <= 0L) {
-                continue;
-            }
-            IAEItemStack packet = AE2FluidCraftCompat.packFluidPacket(
-                    calculationKey, queryAmount);
-            if (packet != null && craftingGrid.canEmitFor(packet)) {
-                return true;
-            }
+        IAEItemStack packet = AE2FluidCraftCompat.packFluidPacket(
+                calculationKey, amountHint);
+        if (packet != null && craftingGrid.canEmitFor(packet)) {
+            return true;
         }
         return false;
     }
@@ -245,18 +330,11 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
                 new LinkedHashSet<ICraftingPatternDetails>();
         addCraftingFor(result, key);
 
-        if (AE2FluidCraftCompat.isFluidFakeItem(
-                key == null ? null : key.getDefinition())) {
-            long[] queryAmounts = new long[]{amountHint, key.getStackSize(), 1000L, 1L};
-            for (long queryAmount : queryAmounts) {
-                if (queryAmount <= 0L) {
-                    continue;
-                }
-                IAEItemStack packet = AE2FluidCraftCompat.packFluidPacket(
-                        key, queryAmount);
-                if (packet != null && !packet.isSameType(key)) {
-                    addCraftingFor(result, packet);
-                }
+        if (AE2FluidCraftCompat.isFluidFakeItem(key)) {
+            IAEItemStack packet = AE2FluidCraftCompat.packFluidPacket(
+                    key, amountHint);
+            if (packet != null && !packet.isSameType(key)) {
+                addCraftingFor(result, packet);
             }
         }
         return result;
@@ -273,7 +351,9 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
             MECraftingInventory inventory) {
         IItemStorageChannel itemChannel = AEApi.instance().storage()
                 .getStorageChannel(IItemStorageChannel.class);
-        IItemList<IAEItemStack> sourceItems = itemChannel.createList();
+        IItemList<IAEItemStack> bridgeItems = itemChannel.createList();
+        IItemList<IAEFluidStack> fluidItems = null;
+        boolean fluidChannelAuthoritative = false;
 
         if (grid != null) {
             IStorageGrid storageGrid = grid.getCache(IStorageGrid.class);
@@ -281,36 +361,93 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
                 IMEMonitor<IAEItemStack> itemInventory =
                         storageGrid.getInventory(itemChannel);
                 if (itemInventory != null) {
-                    // CraftingGridCache contributes craftable entries to
-                    // getAvailableItems(). They are not network stock and
-                    // must not satisfy a calculation input.
                     itemInventory.getAvailableItems(
-                            new ItemListIgnoreCrafting<IAEItemStack>(sourceItems));
+                            new ItemListIgnoreCrafting<IAEItemStack>(bridgeItems));
+                }
+
+                if (AE2FluidCraftCompat.isAvailable()) {
+                    IFluidStorageChannel fluidChannel = AEApi.instance()
+                            .storage().getStorageChannel(IFluidStorageChannel.class);
+                    IMEMonitor<IAEFluidStack> fluidInventory =
+                            storageGrid.getInventory(fluidChannel);
+                    if (fluidInventory != null) {
+                        // The native fluid channel is authoritative. AE2FC's
+                        // item-channel view is only a compatibility fallback;
+                        // keeping both would allow one fluid to be counted
+                        // twice or preserve a stale virtual entry.
+                        fluidItems = fluidChannel.createList();
+                        fluidInventory.getAvailableItems(
+                                new ItemListIgnoreCrafting<IAEFluidStack>(fluidItems));
+                        fluidChannelAuthoritative = true;
+                    }
                 }
             }
         }
 
         IItemList<IAEItemStack> copiedItems = itemChannel.createList();
-        for (IAEItemStack item : sourceItems) {
-            addSnapshotItem(copiedItems, item, true);
+        for (IAEItemStack item : bridgeItems) {
+            if (!fluidChannelAuthoritative
+                    || !AE2FluidCraftCompat.isFluidFakeItem(item)) {
+                addSnapshotItem(copiedItems, item, true);
+            }
         }
-        // CraftingJob's original list is still useful for ordinary items when
-        // an integration supplies only a partial getAvailableItems() view.
-        // Never add a duplicate here: the fresh network snapshot wins.
+        // The job's original list is a useful fallback for ordinary items.
+        // Do not use its cached virtual-fluid entries when the real fluid
+        // monitor is available.
         for (IAEItemStack item : inventory.getItemList()) {
-            addSnapshotItem(copiedItems, item, false);
+            if (!fluidChannelAuthoritative
+                    || !AE2FluidCraftCompat.isFluidFakeItem(item)) {
+                addSnapshotItem(copiedItems, item, false);
+            }
         }
 
-        mergeFluidItems(copiedItems);
+        if (fluidChannelAuthoritative && fluidItems != null) {
+            for (IAEFluidStack fluid : fluidItems) {
+                if (fluid == null || fluid.getStackSize() <= 0L) {
+                    continue;
+                }
+                IAEItemStack fakeFluid = AE2FluidCraftCompat.packFluid(fluid);
+                if (fakeFluid != null) {
+                    addSnapshotItem(copiedItems, fakeFluid, true);
+                }
+            }
+        } else {
+            // Older AE2FC builds may expose only the virtual item monitor.
+            // Use it only when no native fluid monitor can be read.
+            for (IAEItemStack item : bridgeItems) {
+                if (AE2FluidCraftCompat.isFluidFakeItem(item)) {
+                    addSnapshotItem(copiedItems, item, true);
+                }
+            }
+        }
+
+        AE2QuickCalculation.LOGGER.info(
+                "[QCALC][{}] snapshot authoritativeFluid={} bridgeAll={} bridgeFluids={} jobFluids={} nativeFluids={} copiedFluids={} copiedAll={}",
+                debugTag,
+                fluidChannelAuthoritative,
+                AE2FluidCraftCompat.debugList(bridgeItems, false),
+                AE2FluidCraftCompat.debugList(bridgeItems, true),
+                AE2FluidCraftCompat.debugList(inventory.getItemList(), true),
+                AE2FluidCraftCompat.debugFluidList(fluidItems),
+                AE2FluidCraftCompat.debugList(copiedItems, true),
+                AE2FluidCraftCompat.debugList(copiedItems, false));
         return copiedItems;
     }
 
     private void addSnapshotItem(IItemList<IAEItemStack> copiedItems,
                                  IAEItemStack item,
                                  boolean replaceExisting) {
-        IAEItemStack normalized = AE2FluidCraftCompat.normalizeFluidItem(item);
+        IAEItemStack normalized = normalizeSnapshotItem(item);
         if (normalized == null || normalized.getStackSize() <= 0L
                 || isRequestedOutput(normalized)) {
+            if (AE2FluidCraftCompat.isFluidFakeItem(item)) {
+                AE2QuickCalculation.LOGGER.info(
+                        "[QCALC][{}] snapshot fluid skipped raw={} normalized={} requestedOutput={}",
+                        debugTag,
+                        AE2FluidCraftCompat.debugStack(item),
+                        AE2FluidCraftCompat.debugStack(normalized),
+                        normalized != null && isRequestedOutput(normalized));
+            }
             return;
         }
         // The calculator's snapshot is a storage-only ledger. Status bits
@@ -324,73 +461,28 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
         } else if (replaceExisting) {
             existing.setStackSize(normalized.getStackSize());
         }
+        if (AE2FluidCraftCompat.isFluidFakeItem(item)
+                || AE2FluidCraftCompat.isFluidFakeItem(normalized)) {
+            AE2QuickCalculation.LOGGER.info(
+                    "[QCALC][{}] snapshot fluid accepted raw={} normalized={} replace={} existingBefore={}",
+                    debugTag,
+                    AE2FluidCraftCompat.debugStack(item),
+                    AE2FluidCraftCompat.debugStack(normalized),
+                    replaceExisting,
+                    AE2FluidCraftCompat.debugStack(existing));
+        }
     }
 
-    private void mergeFluidItems(IItemList<IAEItemStack> copiedItems) {
-        if (grid == null || !AE2FluidCraftCompat.isAvailable()) {
-            return;
+    private IAEItemStack normalizeSnapshotItem(IAEItemStack item) {
+        IAEItemStack normalized = AE2FluidCraftCompat.normalizeFluidItem(item);
+        if (normalized == null && item != null
+                && AE2FluidCraftCompat.isAvailable()
+                && AE2FluidCraftCompat.isFluidFakeItem(item.getDefinition())) {
+            throw CraftingCalculator.fallback(
+                    CraftingCalculator.FallbackReason.UNSUPPORTED_PATTERN,
+                    "AE2FC storage fluid could not be normalized safely");
         }
-
-        IStorageGrid storageGrid = grid.getCache(IStorageGrid.class);
-        if (storageGrid == null) {
-            return;
-        }
-
-        IItemStorageChannel itemChannel = AEApi.instance().storage()
-                .getStorageChannel(IItemStorageChannel.class);
-        IItemList<IAEItemStack> available = itemChannel.createList();
-        IMEMonitor<IAEItemStack> itemInventory = storageGrid.getInventory(itemChannel);
-        if (itemInventory != null) {
-            itemInventory.getAvailableItems(
-                    new ItemListIgnoreCrafting<IAEItemStack>(available));
-            for (IAEItemStack item : available) {
-                IAEItemStack normalized = AE2FluidCraftCompat.normalizeFluidItem(item);
-                if (normalized == null || normalized.getStackSize() <= 0L
-                        || !AE2FluidCraftCompat.isFluidFakeItem(
-                        normalized.getDefinition())
-                        || isRequestedOutput(normalized)) {
-                    continue;
-                }
-                IAEItemStack existing = copiedItems.findPrecise(normalized);
-                if (existing == null) {
-                    copiedItems.add(normalized);
-                } else {
-                    // getAvailableItems() is the authoritative view for AE2FC's
-                    // virtual fluid entries. Do not retain a stale cached count.
-                    existing.setStackSize(normalized.getStackSize());
-                }
-            }
-        }
-
-        // Read the real fluid channel as well. This is the authoritative source
-        // for fluid amounts; the item-channel bridge is retained for compatibility
-        // with AE2FC versions that expose only its virtual-item monitor there.
-        IFluidStorageChannel fluidChannel = AEApi.instance().storage()
-                .getStorageChannel(IFluidStorageChannel.class);
-        IMEMonitor<IAEFluidStack> fluidInventory =
-                storageGrid.getInventory(fluidChannel);
-        if (fluidInventory == null) {
-            return;
-        }
-        IItemList<IAEFluidStack> fluids = fluidChannel.createList();
-        fluidInventory.getAvailableItems(
-                new ItemListIgnoreCrafting<IAEFluidStack>(fluids));
-        for (IAEFluidStack fluid : fluids) {
-            if (fluid == null || fluid.getStackSize() <= 0L) {
-                continue;
-            }
-            IAEItemStack fakeFluid = AE2FluidCraftCompat.packFluid(fluid);
-            if (fakeFluid == null || fakeFluid.getStackSize() <= 0L
-                    || isRequestedOutput(fakeFluid)) {
-                continue;
-            }
-            IAEItemStack existing = copiedItems.findPrecise(fakeFluid);
-            if (existing == null) {
-                copiedItems.add(fakeFluid.copy());
-            } else {
-                existing.setStackSize(fakeFluid.getStackSize());
-            }
-        }
+        return normalized;
     }
 
     private boolean isRequestedOutput(IAEItemStack item) {
@@ -398,12 +490,11 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
         return output != null && item != null && output.isSameType(item);
     }
 
-    private void reportStartStatus(IActionSource source) {
-        if (startStatusReported) {
+    private void startCalculationTimer() {
+        if (calculationStartNanos != 0L) {
             return;
         }
-        startStatusReported = true;
-        sendStatus(source, AE2QuickCalculation.STATUS_ACTIVE);
+        calculationStartNanos = System.nanoTime();
     }
 
     private void reportTerminalStatus(IActionSource source, String message) {
@@ -411,18 +502,72 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
             return;
         }
         terminalStatusReported = true;
-        sendStatus(source, message);
+        sendStatus(source, message, getElapsedMillis());
     }
 
-    private void sendStatus(IActionSource source, String message) {
-        AE2QuickCalculation.LOGGER.info(message + " for {}", requestedOutput);
+    private long getElapsedMillis() {
+        if (calculationStartNanos == 0L) {
+            return 0L;
+        }
+        return Math.max(0L, (System.nanoTime() - calculationStartNanos) / 1000000L);
+    }
+
+    private void sendStatus(IActionSource source, String message, long elapsedMillis) {
+        AE2QuickCalculation.LOGGER.info(
+                "[QCALC][{}] status={} elapsedMs={} output={}",
+                debugTag,
+                message,
+                elapsedMillis,
+                AE2FluidCraftCompat.debugStack(requestedOutput));
 
         if (source == null) {
             return;
         }
         Optional<EntityPlayer> player = source.player();
         if (player.isPresent()) {
-            AE2QuickCalculationNetwork.sendStatus(player.get(), message);
+            AE2QuickCalculationNetwork.sendStatus(player.get(), message, elapsedMillis);
+        }
+    }
+
+    private static int countEntries(IItemList<IAEItemStack> list) {
+        int count = 0;
+        if (list != null) {
+            for (IAEItemStack ignored : list) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private static String debugPatternInputs(ICraftingPatternDetails pattern) {
+        try {
+            return AE2FluidCraftCompat.debugArray(pattern.getInputs());
+        } catch (Throwable failure) {
+            return "<error:" + failure.getClass().getSimpleName() + ">";
+        }
+    }
+
+    private static String debugPatternCondensedInputs(ICraftingPatternDetails pattern) {
+        try {
+            return AE2FluidCraftCompat.debugArray(pattern.getCondensedInputs());
+        } catch (Throwable failure) {
+            return "<error:" + failure.getClass().getSimpleName() + ">";
+        }
+    }
+
+    private static String debugPatternOutputs(ICraftingPatternDetails pattern) {
+        try {
+            return AE2FluidCraftCompat.debugArray(pattern.getOutputs());
+        } catch (Throwable failure) {
+            return "<error:" + failure.getClass().getSimpleName() + ">";
+        }
+    }
+
+    private static String debugPatternCondensedOutputs(ICraftingPatternDetails pattern) {
+        try {
+            return AE2FluidCraftCompat.debugArray(pattern.getCondensedOutputs());
+        } catch (Throwable failure) {
+            return "<error:" + failure.getClass().getSimpleName() + ">";
         }
     }
 }

@@ -1,0 +1,12 @@
+{
+  "package": "com.ae2.quickcalculation.mixin.compat",
+  "refmap": "mixins.ae2_quick_calculation.refmap.json",
+  "target": "@env(DEFAULT)",
+  "minVersion": "0.8",
+  "compatibilityLevel": "JAVA_8",
+  "mixins": [
+    "AE2EnhancedDagCraftingJobMixin"
+  ],
+  "client": [],
+  "server": []
+}

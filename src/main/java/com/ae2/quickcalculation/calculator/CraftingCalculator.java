@@ -12,17 +12,32 @@ import appeng.api.storage.data.IAEItemStack;
 import appeng.api.storage.data.IItemList;
 import appeng.crafting.CraftBranchFailure;
 import appeng.crafting.MECraftingInventory;
+import appeng.container.ContainerNull;
 import appeng.me.cluster.implementations.CraftingCPUCluster;
 import appeng.util.Platform;
 import appeng.util.item.AEItemStack;
+import com.ae2.quickcalculation.AE2QuickCalculation;
 import com.ae2.quickcalculation.compat.AE2FluidCraftCompat;
+import net.minecraft.inventory.InventoryCrafting;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.crafting.CraftingManager;
+import net.minecraft.item.crafting.IRecipe;
+import net.minecraft.nbt.NBTBase;
+import net.minecraft.nbt.NBTTagByte;
+import net.minecraft.nbt.NBTTagCompound;
+import net.minecraft.nbt.NBTTagDouble;
+import net.minecraft.nbt.NBTTagFloat;
+import net.minecraft.nbt.NBTTagInt;
+import net.minecraft.nbt.NBTTagLong;
+import net.minecraft.nbt.NBTTagShort;
+import net.minecraft.util.NonNullList;
 import net.minecraft.world.World;
 
 import java.math.BigInteger;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
@@ -46,9 +61,21 @@ import java.util.Set;
 public final class CraftingCalculator {
     private static final long BYTE_COST_PER_CRAFT = 8L;
     private static final long LONG_MAX = Long.MAX_VALUE;
+    private static final int MAX_ALTERNATIVE_CYCLE_SCAN_NODES = 512;
+    /*
+     * NBT-backed durability has no Forge-wide maximum-damage contract. Keep
+     * the fallback bounded, but make it logarithmic rather than walking every
+     * durability point. Normal tools never reach this path.
+     */
+    private static final long MAX_NBT_DURABILITY_PROBE_USES = 1L << 20;
+    private static final String[] NBT_DURABILITY_FIELD_NAMES = {
+            "Dmg", "Damage", "damage", "Durability", "durability",
+            "Wear", "wear"
+    };
 
     private final ICraftingGrid grid;
     private final World world;
+    private final String debugTag;
 
     private IItemList<IAEItemStack> availableItems;
     private IItemList<IAEItemStack> usedItems;
@@ -62,13 +89,25 @@ public final class CraftingCalculator {
     private long bytes;
 
     public CraftingCalculator(ICraftingGrid grid, World world) {
+        this(grid, world, "unbound");
+    }
+
+    public CraftingCalculator(ICraftingGrid grid, World world, String debugTag) {
         this.grid = grid;
         this.world = world;
+        this.debugTag = debugTag == null ? "unbound" : debugTag;
     }
 
     public Result calculate(ICraftingPatternDetails rootPattern,
                             long requestedAmount,
                             MECraftingInventory inventory) {
+        AE2QuickCalculation.LOGGER.info(
+                "[QCALC][{}] calculator start pattern={} request={} rawInputs={} rawOutputs={}",
+                debugTag,
+                rootPattern == null ? "null" : rootPattern.getClass().getName(),
+                requestedAmount,
+                safeInputs(rootPattern),
+                safeOutputs(rootPattern));
         if (!isSupported(rootPattern)) {
             throw unsupported(FallbackReason.UNSUPPORTED_PATTERN,
                     "Pattern requires AE2 native slot handling: " + rootPattern);
@@ -105,8 +144,19 @@ public final class CraftingCalculator {
                 : output.getStackSize();
         IAEItemStack finalOutput = output.copy();
         finalOutput.setStackSize(resultAmount);
-        return new Result(finalOutput, bytes, usedItems, missingItems,
-                emittedItems, patternTimes, cycleOptimized);
+        Result result = new Result(finalOutput, bytes, usedItems, missingItems,
+                emittedItems, patternTimes, cycleOptimized, debugTag);
+        AE2QuickCalculation.LOGGER.info(
+                "[QCALC][{}] calculator complete output={} missing={} used={} emitted={} patterns={} bytes={} cycle={}",
+                debugTag,
+                AE2FluidCraftCompat.debugStack(result.getOutput()),
+                AE2FluidCraftCompat.debugList(result.getMissingItems(), false),
+                AE2FluidCraftCompat.debugList(result.getUsedItems(), false),
+                AE2FluidCraftCompat.debugList(result.getEmittedItems(), false),
+                result.getPatternCount(),
+                result.getBytes(),
+                result.isCycleOptimized());
+        return result;
     }
 
     private void craftPattern(PatternInfo rootPattern, long crafts) {
@@ -161,7 +211,7 @@ public final class CraftingCalculator {
                     if (missingUses > 0L) {
                         long freshItems = divideRoundUp(
                                 missingUses,
-                                input.durability.capacity(input.input.getItemDamage()));
+                                input.durability.capacity(input.input));
                         frame.continuation = InputContinuation.durable(input, missingUses);
                         scheduleRequest(input.key, freshItems, input.perCraft, frames);
                     }
@@ -265,9 +315,30 @@ public final class CraftingCalculator {
             return false;
         }
 
-        CyclePlan plan = buildCyclePlan(candidate, rootKey);
-        executeCycle(plan, rootKey, requested);
-        return true;
+        try {
+            CyclePlan plan = buildCyclePlan(candidate, rootKey);
+            executeCycle(plan, rootKey, requested);
+            return true;
+        } catch (CalculationFallbackException failure) {
+            // A neutral/dissipative cycle, or a productive cycle without a
+            // seed, is still safe to traverse as an ordinary dependency graph.
+            // The active-key guard will stop at the first cycle boundary and
+            // report that boundary as a missing material.
+            if (isOrdinaryCycleBoundary(failure.getReason())) {
+                AE2QuickCalculation.LOGGER.info(
+                        "[QCALC][{}] root cycle downgraded to ordinary dependency traversal reason={}",
+                        debugTag,
+                        failure.getReason());
+                return false;
+            }
+            throw failure;
+        }
+    }
+
+    private static boolean isOrdinaryCycleBoundary(FallbackReason reason) {
+        return reason == FallbackReason.CYCLE_NO_SEED
+                || reason == FallbackReason.CYCLE_NEUTRAL
+                || reason == FallbackReason.CYCLE_DISSIPATIVE;
     }
 
     private List<CycleStepInfo> findRootCycle(PatternInfo rootPattern,
@@ -583,7 +654,10 @@ public final class CraftingCalculator {
     private static boolean isPatternReturnedCatalyst(PatternInfo pattern,
                                                        IAEItemStack output) {
         for (InputInfo input : pattern.inputs) {
-            if (input.returnedByPattern && sameKey(input.key, output)) {
+            if (input.returnedByPattern
+                    && (sameKey(input.key, output)
+                    || (input.durability != null
+                    && input.durability.matchesReturned(input.input, output)))) {
                 return true;
             }
         }
@@ -694,28 +768,26 @@ public final class CraftingCalculator {
 
         Collection<IAEItemStack> fuzzyCandidates = source.findFuzzy(
                 input.input, FuzzyMode.IGNORE_ALL);
-        List<IAEItemStack> candidates = null;
-        IAEItemStack onlyCandidate = null;
-        for (IAEItemStack candidate : fuzzyCandidates) {
-            if (isValidDurableCandidate(input, candidate)
-                    && input.durability.capacity(candidate.getItemDamage()) > 0L) {
-                if (onlyCandidate == null) {
-                    onlyCandidate = candidate;
-                } else {
-                    if (candidates == null) {
-                        candidates = new ArrayList<IAEItemStack>();
-                        candidates.add(onlyCandidate);
-                    }
-                    candidates.add(candidate);
-                }
-            }
+        List<IAEItemStack> candidates = findDurableCandidates(
+                fuzzyCandidates, input);
+
+        // Some AE2 1.12 item indexes only classify vanilla damageable items as
+        // fuzzy. NBT-backed tools can therefore be present in the storage list
+        // while findFuzzy() returns nothing. The fallback is used only when the
+        // indexed query produced no usable candidate, keeping the normal path
+        // fast and making the NBT behavior independent of a mod-specific item
+        // interface.
+        if (candidates.isEmpty()) {
+            candidates = findDurableCandidates(source, input);
         }
 
-        if (candidates == null) {
-            if (onlyCandidate == null) {
-                return requiredUses;
-            }
-            return consumeDurableCandidate(input, onlyCandidate, requiredUses, fromNetwork);
+        if (candidates.isEmpty()) {
+            return requiredUses;
+        }
+
+        if (candidates.size() == 1) {
+            return consumeDurableCandidate(input, candidates.get(0),
+                    requiredUses, fromNetwork);
         }
 
         // Prefer the least damaged copies. This minimizes the number of fresh
@@ -723,7 +795,8 @@ public final class CraftingCalculator {
         Collections.sort(candidates, new Comparator<IAEItemStack>() {
             @Override
             public int compare(IAEItemStack left, IAEItemStack right) {
-                return Integer.compare(left.getItemDamage(), right.getItemDamage());
+                return Long.compare(input.durability.currentDamage(left),
+                        input.durability.currentDamage(right));
             }
         });
 
@@ -738,6 +811,22 @@ public final class CraftingCalculator {
         return remaining;
     }
 
+    private List<IAEItemStack> findDurableCandidates(
+            Iterable<IAEItemStack> source,
+            InputInfo input) {
+        List<IAEItemStack> candidates = new ArrayList<IAEItemStack>();
+        if (source == null) {
+            return candidates;
+        }
+        for (IAEItemStack candidate : source) {
+            if (isValidDurableCandidate(input, candidate)
+                    && input.durability.capacity(candidate) > 0L) {
+                candidates.add(candidate);
+            }
+        }
+        return candidates;
+    }
+
     private long consumeDurableCandidate(InputInfo input,
                                          IAEItemStack candidate,
                                          long remaining,
@@ -747,7 +836,7 @@ public final class CraftingCalculator {
         }
 
         long count = Math.max(0L, candidate.getStackSize());
-        long capacity = input.durability.capacity(candidate.getItemDamage());
+        long capacity = input.durability.capacity(candidate);
         if (count <= 0L || capacity <= 0L) {
             return remaining;
         }
@@ -792,7 +881,20 @@ public final class CraftingCalculator {
         ItemStack expected = input.input.copy().setStackSize(1).createItemStack();
         ItemStack actual = candidate.copy().setStackSize(1).createItemStack();
         if (expected == null || actual == null
-                || !ItemStack.areItemStackTagsEqual(expected, actual)) {
+                || expected.getItemDamage() != actual.getItemDamage()) {
+            return false;
+        }
+
+        if (input.durability.isNbt()) {
+            if (!sameNbtExceptPath(expected.getTagCompound(),
+                    actual.getTagCompound(), input.durability.nbtPath)) {
+                return false;
+            }
+        } else if (!ItemStack.areItemStackTagsEqual(expected, actual)) {
+            return false;
+        }
+
+        if (input.durability.currentDamage(candidate) < 0L) {
             return false;
         }
 
@@ -809,15 +911,32 @@ public final class CraftingCalculator {
             return null;
         }
 
-        int currentDamage = current.getItemDamage();
-        long targetDamageLong = (long) currentDamage
-                + uses * (long) durability.damageStep;
-        if (targetDamageLong >= durability.maxDamage
-                || targetDamageLong > Integer.MAX_VALUE) {
+        long currentDamage = durability.currentDamage(current);
+        if (currentDamage < 0L || durability.damageStep <= 0L
+                || uses > (LONG_MAX - currentDamage) / durability.damageStep) {
+            return null;
+        }
+        long targetDamageLong = currentDamage
+                + uses * durability.damageStep;
+        if (targetDamageLong >= durability.maxDamage) {
             return null;
         }
 
         ItemStack currentStack = current.copy().setStackSize(1).createItemStack();
+        if (currentStack == null || currentStack.isEmpty()) {
+            return null;
+        }
+
+        if (durability.isNbt()) {
+            ItemStack returned = currentStack.copy();
+            if (!writeNbtDurability(returned, durability,
+                    targetDamageLong)) {
+                return null;
+            }
+            returned.setCount(1);
+            return AEItemStack.fromItemStack(returned);
+        }
+
         ItemStack first = Platform.getContainerItem(currentStack.copy());
         if (first == null || first.isEmpty()
                 || first.getItem() != currentStack.getItem()
@@ -854,14 +973,32 @@ public final class CraftingCalculator {
         if (choice.pattern == null) {
             addCount(missingItems, normalizedKey, required);
             addBytes(required);
+            if (isFluidKey(normalizedKey)) {
+                AE2QuickCalculation.LOGGER.info(
+                        "[QCALC][{}] fluid missing key={} required={} amountHint={}",
+                        debugTag,
+                        AE2FluidCraftCompat.debugStack(normalizedKey),
+                        required,
+                        amountHint);
+            }
             return;
         }
 
         long crafts = divideRoundUp(required, choice.outputAmount);
         IAEItemStack childKey = normalizedKey.copy();
         if (!activeKeys.add(childKey)) {
-            throw unsupported(FallbackReason.CYCLE_NOT_PROVABLE,
-                    "Crafting dependency cycle detected for " + normalizedKey);
+            // This is the final guard for a cycle that was not rejected during
+            // candidate selection. Treat the edge as an external boundary so
+            // the plan asks for the material that entered the cycle instead of
+            // recursing forever or falling back to AE2's recursive walker.
+            addCount(missingItems, normalizedKey, required);
+            addBytes(required);
+            AE2QuickCalculation.LOGGER.info(
+                    "[QCALC][{}] cycle boundary recorded as missing key={} required={}",
+                    debugTag,
+                    AE2FluidCraftCompat.debugStack(normalizedKey),
+                    required);
+            return;
         }
         frames.push(new PatternFrame(getPatternInfo(choice.pattern), crafts, childKey));
     }
@@ -878,6 +1015,23 @@ public final class CraftingCalculator {
 
         List<OutputInfo> outputs = new ArrayList<OutputInfo>();
         IAEItemStack[] patternOutputs = getCalculationOutputs(pattern);
+        IAEItemStack[] rawInputs = safeInputs(pattern);
+        IAEItemStack[] rawCondensedInputs = safeCondensedInputs(pattern);
+        IAEItemStack[] rawOutputs = safeOutputs(pattern);
+        IAEItemStack[] rawCondensedOutputs = safeCondensedOutputs(pattern);
+        if (containsFluid(rawInputs) || containsFluid(rawCondensedInputs)
+                || containsFluid(rawOutputs) || containsFluid(rawCondensedOutputs)) {
+            AE2QuickCalculation.LOGGER.info(
+                    "[QCALC][{}] fluid pattern info type={} rawInputs={} rawCondensedInputs={} calcInputs={} rawOutputs={} rawCondensedOutputs={} calcOutputs={}",
+                    debugTag,
+                    pattern.getClass().getName(),
+                    safeArray(rawInputs),
+                    safeArray(rawCondensedInputs),
+                    safeArray(getCalculationInputs(pattern)),
+                    safeArray(rawOutputs),
+                    safeArray(rawCondensedOutputs),
+                    safeArray(patternOutputs));
+        }
         if (patternOutputs != null) {
             for (IAEItemStack output : patternOutputs) {
                 if (output != null && output.getStackSize() > 0L) {
@@ -898,6 +1052,23 @@ public final class CraftingCalculator {
             }
             ContainerInfo container = inspectContainer(input);
             boolean returnedByPattern = false;
+            int[] slots = findInputSlots(pattern, input);
+
+            // Crafting patterns carry the recipe's remaining-item semantics,
+            // while their condensed output list intentionally contains only
+            // the requested result. Read the recipe remainder before looking
+            // at pattern outputs so a tool that is returned in a damaged NBT
+            // state is not mistaken for a consumed input.
+            if ((container == null || container.durability == null)
+                    && shouldProbeRecipeContainer(input)) {
+                ContainerInfo recipeContainer = inspectRecipeContainer(
+                        pattern, input, slots);
+                if (recipeContainer != null) {
+                    container = recipeContainer;
+                    returnedByPattern = true;
+                }
+            }
+
             IAEItemStack returned = findExactReturnedInput(
                     patternOutputs, input);
             if (returned == null) {
@@ -914,13 +1085,38 @@ public final class CraftingCalculator {
                 }
                 returnedByPattern = true;
             }
+
+            // Some tools encode their wear in a numeric NBT field instead of
+            // ItemStack damage. Treat the unique, provable input -> output
+            // transition as the returned durable container.
+            if (container == null || container.durability == null) {
+                ContainerInfo nbtContainer = findPatternDurabilityContainer(
+                        input, patternOutputs);
+                if (nbtContainer == null) {
+                    nbtContainer = findPatternDurabilityContainer(input,
+                            getCalculationOutputsFromCondensed(pattern));
+                }
+                if (nbtContainer != null) {
+                    container = nbtContainer;
+                    returnedByPattern = true;
+                }
+            }
             DurabilityInfo durability = container == null ? null : container.durability;
+            if (durability != null && durability.isNbt()) {
+                AE2QuickCalculation.LOGGER.info(
+                        "[QCALC][{}] NBT durability transition input={} returned={} path={} step={} max={}",
+                        debugTag,
+                        AE2FluidCraftCompat.debugStack(input),
+                        AE2FluidCraftCompat.debugStack(container.stack),
+                        durability.nbtPath,
+                        durability.damageStep,
+                        durability.maxDamage);
+            }
             boolean reusable = container != null
                     && durability == null
                     && sameReusableContainer(input, container.stack);
-            int[] slots = findInputSlots(pattern, input);
             int slot = slots.length == 0 ? -1 : slots[0];
-            inputs.add(new InputInfo(
+            InputInfo inputInfo = new InputInfo(
                     pattern,
                     slot,
                     input,
@@ -929,7 +1125,24 @@ public final class CraftingCalculator {
                     durability,
                     returnedByPattern,
                     reusable,
-                    buildInputOptions(pattern, input, slots, container, durability)));
+                    buildInputOptions(pattern, input, slots, container, durability));
+            inputs.add(inputInfo);
+            if (AE2FluidCraftCompat.isFluidFakeItem(input)
+                    || (container != null
+                    && AE2FluidCraftCompat.isFluidFakeItem(container.stack))) {
+                AE2QuickCalculation.LOGGER.info(
+                        "[QCALC][{}] fluid input parsed key={} perCraft={} container={} durability={} returnedByPattern={} reusable={} options={}",
+                        debugTag,
+                        AE2FluidCraftCompat.debugStack(inputInfo.key),
+                        inputInfo.perCraft,
+                        AE2FluidCraftCompat.debugStack(inputInfo.container),
+                        inputInfo.durability == null ? "-"
+                                : (inputInfo.durability.maxDamage + "/"
+                                + inputInfo.durability.damageStep),
+                        inputInfo.returnedByPattern,
+                        inputInfo.reusable,
+                        inputInfo.options.length);
+            }
         }
 
         PatternInfo info = new PatternInfo(
@@ -938,6 +1151,637 @@ public final class CraftingCalculator {
                 outputs.toArray(new OutputInfo[outputs.size()]));
         patternInfoCache.put(pattern, info);
         return info;
+    }
+
+    private static boolean shouldProbeRecipeContainer(IAEItemStack input) {
+        if (input == null || input.getItem() == null) {
+            return false;
+        }
+        ItemStack stack = input.copy().setStackSize(1L).createItemStack();
+        if (stack == null || stack.isEmpty()) {
+            return false;
+        }
+
+        // Ordinary buckets and other vanilla containers are already resolved
+        // by inspectContainer(). The recipe walk is useful for custom
+        // NBT-bearing tools and native damageable items whose recipe supplies
+        // the remainder itself.
+        return stack.hasTagCompound() || stack.getItem().isDamageable();
+    }
+
+    private ContainerInfo inspectRecipeContainer(ICraftingPatternDetails pattern,
+                                                 IAEItemStack input,
+                                                 int[] slots) {
+        boolean trace = input != null && input.getDefinition() != null
+                && input.getDefinition().hasTagCompound();
+        if (trace) {
+            AE2QuickCalculation.LOGGER.info(
+                    "[QCALC][{}] recipe remainder probe start pattern={} craftable={} world={} input={} slots={} rawInputs={}",
+                    debugTag,
+                    pattern == null ? "null" : pattern.getClass().getName(),
+                    pattern != null && pattern.isCraftable(),
+                    world == null ? "null" : world.getClass().getName(),
+                    AE2FluidCraftCompat.debugStack(input),
+                    slots == null ? "null" : Arrays.toString(slots),
+                    safeArray(safeInputs(pattern)));
+        }
+        if (pattern == null || input == null || slots == null
+                || slots.length == 0 || !pattern.isCraftable() || world == null) {
+            if (trace) {
+                AE2QuickCalculation.LOGGER.info(
+                        "[QCALC][{}] recipe remainder probe skipped: invalid context",
+                        debugTag);
+            }
+            return null;
+        }
+
+        InventoryCrafting template = createCraftingInventory(pattern);
+        if (template == null) {
+            if (trace) {
+                AE2QuickCalculation.LOGGER.info(
+                        "[QCALC][{}] recipe remainder probe skipped: crafting inventory could not be created",
+                        debugTag);
+            }
+            return null;
+        }
+        if (trace) {
+            AE2QuickCalculation.LOGGER.info(
+                    "[QCALC][{}] recipe remainder probe template={}",
+                    debugTag,
+                    debugCraftingInventory(template));
+            ItemStack source = input.copy().setStackSize(1L)
+                    .createItemStack();
+            Item item = source == null || source.isEmpty()
+                    ? null : source.getItem();
+            ItemStack direct = item == null
+                    ? ItemStack.EMPTY : getReturnedContainer(item, source);
+            AE2QuickCalculation.LOGGER.info(
+                    "[QCALC][{}] recipe remainder probe itemContainer hasContainer={} direct={}",
+                    debugTag,
+                    item != null && source != null
+                            && item.hasContainerItem(source),
+                    debugMinecraftStack(direct));
+        }
+
+        IRecipe recipe;
+        try {
+            recipe = CraftingManager.findMatchingRecipe(template, world);
+        } catch (Throwable failure) {
+            AE2QuickCalculation.LOGGER.info(
+                    "[QCALC][{}] recipe remainder lookup failed pattern={} reason={}",
+                    debugTag,
+                    pattern.getClass().getName(),
+                    failure.toString());
+            return null;
+        }
+        if (recipe == null) {
+            if (trace) {
+                AE2QuickCalculation.LOGGER.info(
+                        "[QCALC][{}] recipe remainder probe found no matching IRecipe",
+                        debugTag);
+            }
+            return null;
+        }
+        if (trace) {
+            AE2QuickCalculation.LOGGER.info(
+                    "[QCALC][{}] recipe remainder probe matched recipe={}",
+                    debugTag,
+                    recipe.getClass().getName());
+        }
+
+        ContainerInfo selected = null;
+        for (final int slot : slots) {
+            if (slot < 0 || slot >= template.getSizeInventory()) {
+                if (trace) {
+                    AE2QuickCalculation.LOGGER.info(
+                            "[QCALC][{}] recipe remainder probe invalid slot={} size={}",
+                            debugTag, slot, template.getSizeInventory());
+                }
+                return null;
+            }
+
+            InventoryCrafting attempt = copyCraftingInventory(template);
+            ItemStack slotInput = input.copy().setStackSize(1L)
+                    .createItemStack();
+            if (slotInput == null || slotInput.isEmpty()) {
+                if (trace) {
+                    AE2QuickCalculation.LOGGER.info(
+                            "[QCALC][{}] recipe remainder probe input conversion failed slot={}",
+                            debugTag, slot);
+                }
+                return null;
+            }
+            attempt.setInventorySlotContents(slot, slotInput);
+
+            ItemStack remainder = getRecipeRemainder(recipe, attempt, slot);
+            boolean syntheticInput = false;
+            if (remainder == null || remainder.isEmpty()) {
+                remainder = findSyntheticRecipeRemainder(
+                        recipe, template, slot, slotInput);
+                syntheticInput = remainder != null && !remainder.isEmpty();
+            }
+            if (trace) {
+                AE2QuickCalculation.LOGGER.info(
+                        "[QCALC][{}] recipe remainder probe slot={} syntheticInput={} attempt={} remainder={}",
+                        debugTag,
+                        slot,
+                        syntheticInput,
+                        debugCraftingInventory(attempt),
+                        debugMinecraftStack(remainder));
+            }
+            if (remainder == null || remainder.isEmpty()) {
+                return null;
+            }
+
+            final InventoryCrafting probeTemplate = template;
+            final IRecipe probeRecipe = recipe;
+            final int probeSlot = slot;
+            NbtMaxDamageResolver resolver =
+                    new NbtMaxDamageResolver() {
+                        @Override
+                        public long resolve(ItemStack probeInput,
+                                             ItemStack probeOutput,
+                                             NbtPath path,
+                                             NbtNumberType type,
+                                             long step) {
+                            return probeRecipeMaxDamage(
+                                    probeRecipe,
+                                    probeTemplate,
+                                    probeSlot,
+                                    probeInput,
+                                    path,
+                                    type,
+                                    step);
+                        }
+                    };
+            IAEItemStack returned = AEItemStack.fromItemStack(remainder);
+            ContainerInfo current = inspectReturnedContainer(
+                    input, returned, resolver);
+            if (current == null) {
+                if (trace) {
+                    AE2QuickCalculation.LOGGER.info(
+                            "[QCALC][{}] recipe remainder probe transition rejected slot={} returned={}",
+                            debugTag, slot, AE2FluidCraftCompat.debugStack(returned));
+                }
+                return null;
+            }
+
+            if (selected == null) {
+                selected = current;
+            } else if (!sameContainerTransition(input, selected, current)) {
+                // Every occurrence of a repeated input must return the same
+                // transition. Otherwise one aggregate durability stream could
+                // consume or create the wrong number of tools.
+                if (trace) {
+                    AE2QuickCalculation.LOGGER.info(
+                            "[QCALC][{}] recipe remainder probe transitions disagree slot={} selected={} current={}",
+                            debugTag,
+                            slot,
+                            AE2FluidCraftCompat.debugStack(selected.stack),
+                            AE2FluidCraftCompat.debugStack(current.stack));
+                }
+                return null;
+            }
+        }
+
+        if (selected != null && selected.durability != null
+                && selected.durability.isNbt()) {
+            AE2QuickCalculation.LOGGER.info(
+                    "[QCALC][{}] recipe remainder NBT durability recipe={} input={} returned={} path={} step={} max={}",
+                    debugTag,
+                    recipe.getClass().getName(),
+                    AE2FluidCraftCompat.debugStack(input),
+                    AE2FluidCraftCompat.debugStack(selected.stack),
+                    selected.durability.nbtPath,
+                    selected.durability.damageStep,
+                    selected.durability.maxDamage);
+        }
+        return selected;
+    }
+
+    private static String debugCraftingInventory(InventoryCrafting inventory) {
+        if (inventory == null) {
+            return "null";
+        }
+        StringBuilder result = new StringBuilder("[");
+        for (int index = 0; index < inventory.getSizeInventory(); index++) {
+            if (index > 0) {
+                result.append(", ");
+            }
+            result.append(index).append('=').append(
+                    debugMinecraftStack(inventory.getStackInSlot(index)));
+        }
+        return result.append(']').toString();
+    }
+
+    private static String debugMinecraftStack(ItemStack stack) {
+        if (stack == null || stack.isEmpty()) {
+            return "empty";
+        }
+        return String.valueOf(stack.getItem().getRegistryName())
+                + " dmg=" + stack.getItemDamage()
+                + " count=" + stack.getCount()
+                + " nbt=" + (stack.hasTagCompound()
+                ? String.valueOf(stack.getTagCompound()) : "-");
+    }
+
+    private static InventoryCrafting createCraftingInventory(
+            ICraftingPatternDetails pattern) {
+        IAEItemStack[] inputs = safeInputs(pattern);
+        if (inputs == null || inputs.length != 9) {
+            return null;
+        }
+
+        InventoryCrafting inventory = new InventoryCrafting(
+                new ContainerNull(), 3, 3);
+        for (int index = 0; index < inputs.length; index++) {
+            IAEItemStack input = inputs[index];
+            if (input == null || input.getStackSize() <= 0L) {
+                continue;
+            }
+            ItemStack stack = input.copy().setStackSize(1L).createItemStack();
+            if (stack == null || stack.isEmpty()) {
+                return null;
+            }
+            inventory.setInventorySlotContents(index, stack);
+        }
+        return inventory;
+    }
+
+    private static InventoryCrafting copyCraftingInventory(
+            InventoryCrafting source) {
+        InventoryCrafting copy = new InventoryCrafting(
+                new ContainerNull(), 3, 3);
+        for (int index = 0; index < source.getSizeInventory(); index++) {
+            ItemStack stack = source.getStackInSlot(index);
+            if (stack != null && !stack.isEmpty()) {
+                copy.setInventorySlotContents(index, stack.copy());
+            }
+        }
+        return copy;
+    }
+
+    private static ItemStack getRecipeRemainder(IRecipe recipe,
+                                                InventoryCrafting inventory,
+                                                int slot) {
+        try {
+            NonNullList<ItemStack> remaining = recipe.getRemainingItems(
+                    inventory);
+            if (remaining == null || slot < 0 || slot >= remaining.size()) {
+                return ItemStack.EMPTY;
+            }
+            ItemStack result = remaining.get(slot);
+            return result == null ? ItemStack.EMPTY : result;
+        } catch (Throwable failure) {
+            return ItemStack.EMPTY;
+        }
+    }
+
+    private static ItemStack findSyntheticRecipeRemainder(
+            IRecipe recipe,
+            InventoryCrafting template,
+            int slot,
+            ItemStack source) {
+        if (recipe == null || template == null || source == null
+                || source.isEmpty() || slot < 0
+                || slot >= template.getSizeInventory()) {
+            return ItemStack.EMPTY;
+        }
+
+        IAEItemStack original = AEItemStack.fromItemStack(source);
+        if (original == null) {
+            return ItemStack.EMPTY;
+        }
+        List<NbtPath> paths = new ArrayList<NbtPath>();
+        collectMissingDurabilityPaths(source.getTagCompound(),
+                new ArrayList<String>(), paths);
+        NbtMaxDamageResolver unboundedResolver =
+                new NbtMaxDamageResolver() {
+                    @Override
+                    public long resolve(ItemStack input,
+                                         ItemStack output,
+                                         NbtPath path,
+                                         NbtNumberType type,
+                                         long step) {
+                        return LONG_MAX;
+                    }
+                };
+
+        for (NbtPath path : paths) {
+            for (NbtNumberType type : NbtNumberType.values()) {
+                ItemStack probe = source.copy();
+                NBTTagCompound tag = probe.getTagCompound();
+                if (tag == null) {
+                    tag = new NBTTagCompound();
+                    probe.setTagCompound(tag);
+                }
+                if (!setTagAtPath(tag, path, type.write(0L))) {
+                    continue;
+                }
+
+                InventoryCrafting attempt = copyCraftingInventory(template);
+                attempt.setInventorySlotContents(slot, probe);
+                ItemStack remainder = getRecipeRemainder(recipe, attempt, slot);
+                if (remainder == null || remainder.isEmpty()) {
+                    continue;
+                }
+
+                IAEItemStack returned = AEItemStack.fromItemStack(remainder);
+                ContainerInfo transition = inspectReturnedContainer(
+                        original, returned, unboundedResolver);
+                if (transition != null && transition.durability != null
+                        && transition.durability.isNbt()) {
+                    return remainder;
+                }
+            }
+        }
+        return ItemStack.EMPTY;
+    }
+
+    private static long probeRecipeMaxDamage(IRecipe recipe,
+                                             InventoryCrafting template,
+                                             int slot,
+                                             ItemStack input,
+                                             NbtPath path,
+                                             NbtNumberType type,
+                                             long step) {
+        if (recipe == null || template == null || input == null
+                || input.isEmpty() || path == null || type == null
+                || step <= 0L) {
+            return 0L;
+        }
+
+        /*
+         * Most NBT tools expose the same transition through Item#getContainerItem
+         * that the crafting recipe returns. Prefer that path when the first
+         * observed result agrees; it avoids rebuilding an InventoryCrafting for
+         * every binary-search probe. If a recipe has custom remainder logic,
+         * retain the recipe callback as the conservative fallback.
+         */
+        ItemStack direct = getReturnedContainer(input.getItem(), input);
+        ItemStack firstOutput = getRecipeRemainder(
+                recipe,
+                replaceCraftingSlot(template, slot, input),
+                slot);
+        if (sameMinecraftStack(direct, firstOutput)) {
+            return probeNbtMaxDamage(input, path, type, step,
+                    new NbtTransitionProbe() {
+                        @Override
+                        public ItemStack apply(ItemStack state) {
+                            return getReturnedContainer(state.getItem(), state);
+                        }
+                    });
+        }
+
+        return probeNbtMaxDamage(input, path, type, step,
+                new NbtTransitionProbe() {
+                    @Override
+                    public ItemStack apply(ItemStack state) {
+                        InventoryCrafting attempt = copyCraftingInventory(template);
+                        attempt.setInventorySlotContents(slot, state.copy());
+                        return getRecipeRemainder(recipe, attempt, slot);
+                    }
+                });
+    }
+
+    private static InventoryCrafting replaceCraftingSlot(
+            InventoryCrafting template,
+            int slot,
+            ItemStack input) {
+        InventoryCrafting attempt = copyCraftingInventory(template);
+        if (slot >= 0 && slot < attempt.getSizeInventory()
+                && input != null && !input.isEmpty()) {
+            attempt.setInventorySlotContents(slot, input.copy());
+        }
+        return attempt;
+    }
+
+    private static long probeNbtMaxDamage(ItemStack input,
+                                          NbtPath path,
+                                          NbtNumberType type,
+                                          long step) {
+        return probeNbtMaxDamage(input, path, type, step,
+                new NbtTransitionProbe() {
+                    @Override
+                    public ItemStack apply(ItemStack state) {
+                        return getReturnedContainer(state.getItem(), state);
+                    }
+                });
+    }
+
+    /**
+     * Finds the first exhausted durability state with O(log(max)) calls. An
+     * arbitrary NBT number is not assumed to be durability until every tested
+     * transition preserves the item and all non-durability NBT.
+     */
+    private static long probeNbtMaxDamage(ItemStack input,
+                                          NbtPath path,
+                                          NbtNumberType type,
+                                          long step,
+                                          NbtTransitionProbe transitionProbe) {
+        if (input == null || input.isEmpty() || path == null || type == null
+                || step <= 0L || transitionProbe == null) {
+            return 0L;
+        }
+
+        ItemStack zero = createNbtProbeState(input, path, type, 0L);
+        if (zero == null) {
+            return 0L;
+        }
+        int zeroStatus = classifyNbtTransition(
+                zero, transitionProbe.apply(zero), path, type, step);
+        if (zeroStatus == NBT_PROBE_INVALID) {
+            return 0L;
+        }
+        if (zeroStatus == NBT_PROBE_EXHAUSTED) {
+            return step;
+        }
+
+        long lastValidState = 0L;
+        long firstExhaustedState = 0L;
+        long high = 1L;
+        while (high <= MAX_NBT_DURABILITY_PROBE_USES) {
+            long damage = multiplyProbeUses(high, step);
+            if (damage < 0L) {
+                return 0L;
+            }
+            ItemStack state = createNbtProbeState(input, path, type, damage);
+            if (state == null) {
+                return 0L;
+            }
+            int status = classifyNbtTransition(
+                    state, transitionProbe.apply(state), path, type, step);
+            if (status == NBT_PROBE_INVALID) {
+                return 0L;
+            }
+            if (status == NBT_PROBE_EXHAUSTED) {
+                firstExhaustedState = high;
+                break;
+            }
+
+            lastValidState = high;
+            if (high == MAX_NBT_DURABILITY_PROBE_USES) {
+                return 0L;
+            }
+            high = high > MAX_NBT_DURABILITY_PROBE_USES / 2L
+                    ? MAX_NBT_DURABILITY_PROBE_USES
+                    : high * 2L;
+        }
+
+        if (firstExhaustedState <= lastValidState) {
+            return 0L;
+        }
+
+        long low = lastValidState;
+        long upper = firstExhaustedState;
+        while (upper - low > 1L) {
+            long middle = low + (upper - low) / 2L;
+            long damage = multiplyProbeUses(middle, step);
+            if (damage < 0L) {
+                return 0L;
+            }
+            ItemStack state = createNbtProbeState(input, path, type, damage);
+            if (state == null) {
+                return 0L;
+            }
+            int status = classifyNbtTransition(
+                    state, transitionProbe.apply(state), path, type, step);
+            if (status == NBT_PROBE_INVALID) {
+                return 0L;
+            }
+            if (status == NBT_PROBE_EXHAUSTED) {
+                upper = middle;
+            } else {
+                low = middle;
+            }
+        }
+
+        return multiplyProbeUses(upper + 1L, step);
+    }
+
+    private static final int NBT_PROBE_INVALID = 0;
+    private static final int NBT_PROBE_VALID = 1;
+    private static final int NBT_PROBE_EXHAUSTED = 2;
+
+    private static int classifyNbtTransition(ItemStack state,
+                                             ItemStack next,
+                                             NbtPath path,
+                                             NbtNumberType type,
+                                             long step) {
+        if (next == null || next.isEmpty()) {
+            return NBT_PROBE_EXHAUSTED;
+        }
+        if (state.getItem() != next.getItem()
+                || state.getItemDamage() != next.getItemDamage()) {
+            return NBT_PROBE_INVALID;
+        }
+
+        Long current = readNumericValue(getTagAtPath(
+                state.getTagCompound(), path));
+        Long returned = readNumericValue(getTagAtPath(
+                next.getTagCompound(), path));
+        if (current == null || returned == null
+                || current.longValue() > LONG_MAX - step
+                || returned.longValue() != current.longValue() + step
+                || !sameNbtExceptPath(state.getTagCompound(),
+                next.getTagCompound(), path)) {
+            return NBT_PROBE_INVALID;
+        }
+        return NBT_PROBE_VALID;
+    }
+
+    private static ItemStack createNbtProbeState(ItemStack input,
+                                                 NbtPath path,
+                                                 NbtNumberType type,
+                                                 long damage) {
+        NBTBase encoded = type.write(damage);
+        if (encoded == null) {
+            return null;
+        }
+        ItemStack state = input.copy();
+        state.setCount(1);
+        NBTTagCompound tag = state.getTagCompound();
+        if (tag == null) {
+            tag = new NBTTagCompound();
+            state.setTagCompound(tag);
+        }
+        return setTagAtPath(tag, path, encoded) ? state : null;
+    }
+
+    private static long multiplyProbeUses(long uses, long step) {
+        if (uses < 0L || step <= 0L || uses > LONG_MAX / step) {
+            return -1L;
+        }
+        return uses * step;
+    }
+
+    private interface NbtTransitionProbe {
+        ItemStack apply(ItemStack state);
+    }
+
+    private static boolean sameContainerTransition(IAEItemStack input,
+                                                   ContainerInfo left,
+                                                   ContainerInfo right) {
+        if (left == null || right == null || left.stack == null
+                || right.stack == null
+                || !sameItemAndDamage(left.stack, right.stack)
+                || !sameNbt(left.stack, right.stack)) {
+            return false;
+        }
+        if (left.durability == null || right.durability == null) {
+            return left.durability == right.durability
+                    && left.durability == null
+                    && sameReusableContainer(input, left.stack)
+                    && sameReusableContainer(input, right.stack);
+        }
+        return left.durability.sameTransition(right.durability);
+    }
+
+    private static ContainerInfo inspectReturnedContainer(
+            IAEItemStack input,
+            IAEItemStack returned,
+            NbtMaxDamageResolver maxDamageResolver) {
+        if (input == null || returned == null) {
+            return null;
+        }
+
+        ItemStack source = input.copy().setStackSize(1L).createItemStack();
+        ItemStack container = returned.copy().setStackSize(1L)
+                .createItemStack();
+        if (source == null || source.isEmpty()
+                || container == null || container.isEmpty()) {
+            return null;
+        }
+
+        DurabilityInfo durability = null;
+        if (isDamageableItem(source.getItem())) {
+            int currentDamage = source.getItemDamage();
+            int maxDamage = source.getMaxDamage();
+            int nextDamage = container.getItemDamage();
+            if (container.getItem() == source.getItem()
+                    && ItemStack.areItemStackTagsEqual(source, container)
+                    && maxDamage > currentDamage
+                    && nextDamage > currentDamage
+                    && nextDamage <= maxDamage
+                    && nextDamage - currentDamage == 1) {
+                durability = new DurabilityInfo(maxDamage,
+                        nextDamage - currentDamage);
+            }
+        }
+
+        IAEItemStack stack = AEItemStack.fromItemStack(container);
+        if (stack == null) {
+            return null;
+        }
+        if (durability == null) {
+            NbtDurabilityTransition nbtTransition =
+                    findNbtDurabilityTransition(input, stack,
+                            maxDamageResolver);
+            if (nbtTransition != null) {
+                durability = nbtTransition.durability;
+            }
+        }
+        return new ContainerInfo(stack, durability);
     }
 
     private static IAEItemStack findExactReturnedInput(IAEItemStack[] outputs,
@@ -955,6 +1799,317 @@ public final class CraftingCalculator {
             return null;
         }
         return input.copy().setStackSize(1L);
+    }
+
+    private static ContainerInfo findPatternDurabilityContainer(
+            IAEItemStack input,
+            IAEItemStack[] outputs) {
+        if (input == null || outputs == null || input.getStackSize() <= 0L) {
+            return null;
+        }
+
+        long sameItemAmount = 0L;
+        long transitionedAmount = 0L;
+        NbtDurabilityTransition selected = null;
+        for (IAEItemStack output : outputs) {
+            if (output == null || output.getStackSize() <= 0L
+                    || !sameItemAndDamage(input, output)) {
+                continue;
+            }
+
+            sameItemAmount = checkedAdd(sameItemAmount, output.getStackSize());
+            NbtDurabilityTransition transition =
+                    findNbtDurabilityTransition(input, output);
+            if (transition == null) {
+                continue;
+            }
+
+            transitionedAmount = checkedAdd(transitionedAmount,
+                    output.getStackSize());
+            if (selected == null) {
+                selected = transition;
+            } else if (!selected.durability.sameTransition(
+                    transition.durability)
+                    || selected.output.getStackSize() != transition.output.getStackSize()
+                    || !sameNbt(selected.output, transition.output)) {
+                // Multiple different returned states are ambiguous. Treating
+                // one of them as a single durability stream could duplicate
+                // or destroy a tool, so let AE2 handle this pattern.
+                return null;
+            }
+        }
+
+        if (selected == null || sameItemAmount != input.getStackSize()
+                || transitionedAmount != input.getStackSize()) {
+            return null;
+        }
+
+        IAEItemStack returned = selected.output.copy().setStackSize(1L);
+        return new ContainerInfo(returned, selected.durability);
+    }
+
+    private static NbtDurabilityTransition findNbtDurabilityTransition(
+            IAEItemStack input,
+            IAEItemStack output) {
+        return findNbtDurabilityTransition(input, output, null);
+    }
+
+    private static NbtDurabilityTransition findNbtDurabilityTransition(
+            IAEItemStack input,
+            IAEItemStack output,
+            NbtMaxDamageResolver maxDamageResolver) {
+        if (input == null || output == null
+                || input.getStackSize() <= 0L
+                || output.getStackSize() <= 0L
+                || !sameItemAndDamage(input, output)) {
+            return null;
+        }
+
+        ItemStack inputStack = input.copy().setStackSize(1).createItemStack();
+        ItemStack outputStack = output.copy().setStackSize(1).createItemStack();
+        if (inputStack == null || outputStack == null) {
+            return null;
+        }
+
+        NBTTagCompound inputTag = inputStack.getTagCompound();
+        NBTTagCompound outputTag = outputStack.getTagCompound();
+        if (outputTag == null) {
+            return null;
+        }
+
+        List<NbtPath> paths = new ArrayList<NbtPath>();
+        collectNumericPaths(outputTag, new ArrayList<String>(), paths);
+        NbtDurabilityTransition selected = null;
+        for (NbtPath path : paths) {
+            NBTBase outputValueTag = getTagAtPath(outputTag, path);
+            NbtNumberType outputType = NbtNumberType.from(outputValueTag);
+            if (outputType == null) {
+                continue;
+            }
+
+            NBTBase inputValueTag = getTagAtPath(inputTag, path);
+            if (inputValueTag != null
+                    && NbtNumberType.from(inputValueTag) == null) {
+                continue;
+            }
+
+            Long inputValue = inputValueTag == null
+                    ? Long.valueOf(0L)
+                    : readNumericValue(inputValueTag);
+            Long outputValue = readNumericValue(outputValueTag);
+            if (inputValue == null || outputValue == null
+                    || outputValue.longValue() <= inputValue.longValue()) {
+                continue;
+            }
+
+            long step = outputValue.longValue() - inputValue.longValue();
+            if (step <= 0L
+                    || !sameNbtExceptPath(inputTag, outputTag, path)) {
+                continue;
+            }
+
+            long maxDamage = resolveMaxDamage(inputStack, outputStack,
+                    path, outputType, step, maxDamageResolver);
+            if (maxDamage <= 0L || outputValue.longValue() > maxDamage) {
+                continue;
+            }
+
+            DurabilityInfo durability = DurabilityInfo.nbt(
+                    maxDamage, step, path, outputType);
+            NbtDurabilityTransition candidate =
+                    new NbtDurabilityTransition(durability, output.copy());
+            if (selected != null) {
+                return null;
+            }
+            selected = candidate;
+        }
+        return selected;
+    }
+
+    private static long resolveMaxDamage(ItemStack input,
+                                         ItemStack output,
+                                         NbtPath path,
+                                         NbtNumberType type,
+                                         long step,
+                                         NbtMaxDamageResolver maxDamageResolver) {
+        if (maxDamageResolver != null) {
+            return maxDamageResolver.resolve(input, output, path, type, step);
+        }
+        // This method is only used for an NBT-backed transition. ItemStack's
+        // native max-damage field is not authoritative for such items: many
+        // integrations leave it at a default value (for example 256) while
+        // storing the real wear limit in their own NBT/tool logic.
+        //
+        // Probe the public container transition instead. A finite endpoint is
+        // required; an unknown or unbounded transition must not be turned into
+        // an invented capacity because that could duplicate or destroy tools.
+        return probeNbtMaxDamage(input, path, type, step);
+    }
+
+    private static boolean sameItemAndDamage(IAEItemStack left,
+                                              IAEItemStack right) {
+        return left != null && right != null
+                && left.getItem() == right.getItem()
+                && left.getItemDamage() == right.getItemDamage();
+    }
+
+    private static boolean sameMinecraftStack(ItemStack left, ItemStack right) {
+        if (left == null || right == null || left.isEmpty() || right.isEmpty()) {
+            return left == right || (left != null && right != null
+                    && left.isEmpty() && right.isEmpty());
+        }
+        return left.getItem() == right.getItem()
+                && left.getItemDamage() == right.getItemDamage()
+                && ItemStack.areItemStackTagsEqual(left, right);
+    }
+
+    private static boolean sameNbt(IAEItemStack left, IAEItemStack right) {
+        if (left == null || right == null) {
+            return false;
+        }
+        return sameNbt(left.copy().setStackSize(1).createItemStack(),
+                right.copy().setStackSize(1).createItemStack());
+    }
+
+    private static boolean sameNbt(ItemStack left, ItemStack right) {
+        if (left == null || right == null) {
+            return false;
+        }
+        NBTTagCompound leftTag = left.getTagCompound();
+        NBTTagCompound rightTag = right.getTagCompound();
+        if (leftTag == null || rightTag == null) {
+            return leftTag == rightTag;
+        }
+        return leftTag.equals(rightTag);
+    }
+
+    private static void collectNumericPaths(NBTTagCompound tag,
+                                            List<String> prefix,
+                                            List<NbtPath> result) {
+        if (tag == null) {
+            return;
+        }
+        for (String key : tag.getKeySet()) {
+            NBTBase value = tag.getTag(key);
+            List<String> path = new ArrayList<String>(prefix);
+            path.add(key);
+            if (value instanceof NBTTagCompound) {
+                collectNumericPaths((NBTTagCompound) value, path, result);
+            } else if (NbtNumberType.from(value) != null) {
+                result.add(new NbtPath(path));
+            }
+        }
+    }
+
+    private static NBTBase getTagAtPath(NBTTagCompound root, NbtPath path) {
+        if (root == null || path == null || path.parts.length == 0) {
+            return null;
+        }
+        NBTTagCompound current = root;
+        for (int index = 0; index < path.parts.length; index++) {
+            NBTBase value = current.getTag(path.parts[index]);
+            if (index == path.parts.length - 1) {
+                return value;
+            }
+            if (!(value instanceof NBTTagCompound)) {
+                return null;
+            }
+            current = (NBTTagCompound) value;
+        }
+        return null;
+    }
+
+    private static boolean sameNbtExceptPath(NBTTagCompound left,
+                                             NBTTagCompound right,
+                                             NbtPath path) {
+        NBTTagCompound leftCopy = left == null
+                ? new NBTTagCompound() : left.copy();
+        NBTTagCompound rightCopy = right == null
+                ? new NBTTagCompound() : right.copy();
+        removeTagAtPath(leftCopy, path, 0);
+        removeTagAtPath(rightCopy, path, 0);
+        return leftCopy.equals(rightCopy);
+    }
+
+    private static boolean removeTagAtPath(NBTTagCompound root,
+                                           NbtPath path,
+                                           int index) {
+        if (root == null || path == null || index >= path.parts.length) {
+            return false;
+        }
+        String key = path.parts[index];
+        if (index == path.parts.length - 1) {
+            if (!root.hasKey(key)) {
+                return false;
+            }
+            root.removeTag(key);
+            return true;
+        }
+
+        NBTBase child = root.getTag(key);
+        if (!(child instanceof NBTTagCompound)) {
+            return false;
+        }
+        NBTTagCompound childCopy = ((NBTTagCompound) child).copy();
+        boolean removed = removeTagAtPath(childCopy, path, index + 1);
+        if (!removed) {
+            return false;
+        }
+        if (childCopy.getKeySet().isEmpty()) {
+            root.removeTag(key);
+        } else {
+            root.setTag(key, childCopy);
+        }
+        return true;
+    }
+
+    private static Long readNumericValue(NBTBase value) {
+        NbtNumberType type = NbtNumberType.from(value);
+        return type == null ? null : type.read(value);
+    }
+
+    private static boolean writeNbtDurability(ItemStack stack,
+                                              DurabilityInfo durability,
+                                              long value) {
+        if (stack == null || durability == null || !durability.isNbt()
+                || durability.nbtType == null) {
+            return false;
+        }
+        NBTBase encoded = durability.nbtType.write(value);
+        if (encoded == null) {
+            return false;
+        }
+        NBTTagCompound root = stack.getTagCompound();
+        if (root == null) {
+            root = new NBTTagCompound();
+            stack.setTagCompound(root);
+        }
+        return setTagAtPath(root, durability.nbtPath, encoded);
+    }
+
+    private static boolean setTagAtPath(NBTTagCompound root,
+                                         NbtPath path,
+                                         NBTBase value) {
+        if (root == null || path == null || path.parts.length == 0
+                || value == null) {
+            return false;
+        }
+        NBTTagCompound current = root;
+        for (int index = 0; index < path.parts.length - 1; index++) {
+            String key = path.parts[index];
+            NBTBase child = current.getTag(key);
+            if (child == null) {
+                NBTTagCompound created = new NBTTagCompound();
+                current.setTag(key, created);
+                current = created;
+            } else if (child instanceof NBTTagCompound) {
+                current = (NBTTagCompound) child;
+            } else {
+                return false;
+            }
+        }
+        current.setTag(path.parts[path.parts.length - 1], value);
+        return true;
     }
 
     private InputOption[] buildInputOptions(ICraftingPatternDetails pattern,
@@ -1060,52 +2215,295 @@ public final class CraftingCalculator {
     }
 
     private PatternChoice resolvePattern(IAEItemStack key, long amountHint) {
+        boolean activeKey = isActiveKey(key);
         PatternChoice cached = patternCache.get(key);
         // External storage is mutable during one calculation: an earlier
         // lookup may have consumed the last copies of this key. Never reuse
         // an external result from the cache after the ledger changes.
-        if (cached != null && !cached.external && (!isFluidKey(key)
+        // A choice made outside a recursive path must also not hide an
+        // alternative when the same key is encountered recursively.
+        if (!activeKey && cached != null && !cached.external && (!isFluidKey(key)
                 || cached.pattern != null
                 || amountHint <= 0L)) {
             return cached;
         }
 
+        boolean fluidKey = isFluidKey(key);
+        boolean available = hasAvailable(key);
+        boolean emitable = canEmitFor(key, amountHint);
+
         // ICraftingGrid#canEmitFor only describes whether the network can
         // emit this type at all. It does not promise an unlimited quantity.
         // The private inventory ledger is authoritative for the amount that
         // remains after earlier inputs have been reserved.
-        if (canEmitFor(key, amountHint) && hasAvailable(key)) {
+        if (emitable && available) {
+            if (fluidKey) {
+                AE2QuickCalculation.LOGGER.info(
+                        "[QCALC][{}] fluid resolve external key={} amountHint={} available={} emitable={}",
+                        debugTag,
+                        AE2FluidCraftCompat.debugStack(key),
+                        amountHint,
+                        available,
+                        emitable);
+            }
             return new PatternChoice(true, null, 0L);
         }
 
         ICraftingPatternDetails pattern = null;
         long outputAmount = 0L;
+        int candidateCount = 0;
+        boolean cycleCandidateRejected = false;
+        boolean cycleCandidateActive = false;
+        boolean cycleCandidateUnprovable = false;
         for (ICraftingPatternDetails candidate : getCraftingFor(key, amountHint)) {
+            candidateCount++;
             IAEItemStack[] outputs = getCalculationOutputs(candidate);
             if (outputs == null) {
                 continue;
             }
+            long candidateOutputAmount = 0L;
+            boolean matchesKey = false;
             for (IAEItemStack output : outputs) {
                 if (output != null && output.getStackSize() > 0L
                         && output.isSameType(key)) {
-                    pattern = candidate;
-                    outputAmount = output.getStackSize();
+                    matchesKey = true;
+                    candidateOutputAmount = output.getStackSize();
                     break;
                 }
             }
+            if (!matchesKey) {
+                continue;
+            }
+
+            if (!activeKeys.isEmpty()) {
+                CycleDependencyStatus cycleStatus =
+                        checkCycleCandidate(candidate, amountHint);
+                if (cycleStatus != CycleDependencyStatus.SAFE) {
+                    cycleCandidateRejected = true;
+                    cycleCandidateActive |=
+                            cycleStatus == CycleDependencyStatus.ACTIVE;
+                    cycleCandidateUnprovable |=
+                            cycleStatus == CycleDependencyStatus.UNPROVABLE;
+                    AE2QuickCalculation.LOGGER.info(
+                            "[QCALC][{}] cycle candidate skipped key={} pattern={} reason={}",
+                            debugTag,
+                            AE2FluidCraftCompat.debugStack(key),
+                            candidate.getClass().getName(),
+                            cycleStatus);
+                    continue;
+                }
+            }
+
+            pattern = candidate;
+            outputAmount = candidateOutputAmount;
             if (pattern != null) {
                 break;
             }
         }
 
         PatternChoice choice = new PatternChoice(false, pattern, outputAmount);
+        if (pattern == null && cycleCandidateRejected
+                && cycleCandidateUnprovable && !cycleCandidateActive) {
+            throw unsupported(FallbackReason.CYCLE_NOT_PROVABLE,
+                    "All crafting patterns for " + key
+                            + " are outside the provable dependency boundary");
+        }
+        if (fluidKey) {
+            AE2QuickCalculation.LOGGER.info(
+                    "[QCALC][{}] fluid resolve key={} amountHint={} available={} emitable={} candidates={} selected={} outputAmount={}",
+                    debugTag,
+                    AE2FluidCraftCompat.debugStack(key),
+                    amountHint,
+                    available,
+                    emitable,
+                    candidateCount,
+                    pattern == null ? "none" : pattern.getClass().getName(),
+                    outputAmount);
+        }
         // A packet-indexed fluid pattern can only be found after the caller
         // supplies its per-craft fluid amount. Do not cache a fluid miss from
         // an amount-less probe and hide a later, more precise query.
-        if (!isFluidKey(key) || pattern != null) {
+        if (!activeKey && (!isFluidKey(key) || pattern != null)) {
             patternCache.put(key, choice);
         }
         return choice;
+    }
+
+    private boolean isActiveKey(IAEItemStack key) {
+        if (key == null || activeKeys == null) {
+            return false;
+        }
+        for (IAEItemStack active : activeKeys) {
+            if (sameKey(active, key)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Checks a recursive candidate without changing the calculation ledger.
+     * A candidate is rejected only when every reachable producer path either
+     * returns to an active key or cannot be proven within the scan budget.
+     */
+    private boolean isCycleCandidateSafe(ICraftingPatternDetails candidate,
+                                         long amountHint) {
+        return checkCycleCandidate(candidate, amountHint)
+                == CycleDependencyStatus.SAFE;
+    }
+
+    private CycleDependencyStatus checkCycleCandidate(
+            ICraftingPatternDetails candidate,
+            long amountHint) {
+        PatternInfo info;
+        try {
+            info = getPatternInfo(candidate);
+        } catch (CalculationFallbackException failure) {
+            return CycleDependencyStatus.UNPROVABLE;
+        }
+
+        CycleSearchBudget budget = new CycleSearchBudget(
+                MAX_ALTERNATIVE_CYCLE_SCAN_NODES);
+        Set<IAEItemStack> path = new LinkedHashSet<IAEItemStack>();
+        return candidateReachesActive(info, path, budget);
+    }
+
+    private CycleDependencyStatus candidateReachesActive(
+            PatternInfo pattern,
+            Set<IAEItemStack> path,
+            CycleSearchBudget budget) {
+        boolean unprovable = false;
+        for (InputInfo input : pattern.inputs) {
+            if (input == null || input.key == null
+                    || input.perCraft <= 0L) {
+                continue;
+            }
+            CycleDependencyStatus status = dependencyReachesActive(
+                    input.key, input.perCraft, path, budget);
+            if (status == CycleDependencyStatus.ACTIVE) {
+                return CycleDependencyStatus.ACTIVE;
+            }
+            if (status == CycleDependencyStatus.UNPROVABLE) {
+                unprovable = true;
+            }
+        }
+        return unprovable ? CycleDependencyStatus.UNPROVABLE
+                : CycleDependencyStatus.SAFE;
+    }
+
+    private CycleDependencyStatus dependencyReachesActive(
+            IAEItemStack key,
+            long required,
+            Set<IAEItemStack> path,
+            CycleSearchBudget budget) {
+        if (key == null || key.getStackSize() <= 0L) {
+            return CycleDependencyStatus.SAFE;
+        }
+        if (isActiveKey(key)) {
+            return CycleDependencyStatus.ACTIVE;
+        }
+        if (amountOf(key) >= required) {
+            return CycleDependencyStatus.SAFE;
+        }
+        if (!budget.consume()) {
+            return CycleDependencyStatus.UNPROVABLE;
+        }
+
+        if (!addCyclePathKey(path, key)) {
+            // A closed path that does not include an active key is a possible
+            // cycle boundary, not proof that the dependency reaches the
+            // current request. The actual traversal will stop when it reaches
+            // the active key that entered the cycle.
+            return CycleDependencyStatus.SAFE;
+        }
+
+        boolean matchedPattern = false;
+        boolean safeCandidate = false;
+        boolean activeCandidate = false;
+        boolean unprovableCandidate = false;
+        try {
+            for (ICraftingPatternDetails candidate : getCraftingFor(
+                    key, Math.max(1L, required))) {
+                if (!hasOutputFor(candidate, key)) {
+                    continue;
+                }
+                matchedPattern = true;
+
+                PatternInfo info;
+                try {
+                    info = getPatternInfo(candidate);
+                } catch (CalculationFallbackException failure) {
+                    unprovableCandidate = true;
+                    continue;
+                }
+                CycleDependencyStatus status = candidateReachesActive(
+                        info, path, budget);
+                if (status == CycleDependencyStatus.SAFE) {
+                    safeCandidate = true;
+                    break;
+                }
+                if (status == CycleDependencyStatus.ACTIVE) {
+                    activeCandidate = true;
+                } else {
+                    unprovableCandidate = true;
+                }
+            }
+        } finally {
+            removeCyclePathKey(path, key);
+        }
+
+        // No producer means a missing/external input, which terminates this
+        // dependency walk. A closed non-active cycle also terminates the
+        // proof. Only an active path blocks the candidate; unknown paths stay
+        // conservative and request a controlled fallback.
+        if (safeCandidate || !matchedPattern) {
+            return CycleDependencyStatus.SAFE;
+        }
+        if (activeCandidate) {
+            return CycleDependencyStatus.ACTIVE;
+        }
+        return unprovableCandidate ? CycleDependencyStatus.UNPROVABLE
+                : CycleDependencyStatus.SAFE;
+    }
+
+    private boolean hasOutputFor(ICraftingPatternDetails pattern,
+                                 IAEItemStack key) {
+        IAEItemStack[] outputs = getCalculationOutputs(pattern);
+        if (outputs == null) {
+            return false;
+        }
+        for (IAEItemStack output : outputs) {
+            if (output != null && output.getStackSize() > 0L
+                    && output.isSameType(key)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean addCyclePathKey(Set<IAEItemStack> path,
+                                           IAEItemStack key) {
+        if (containsKey(path, key)) {
+            return false;
+        }
+        IAEItemStack copy = key.copy();
+        copy.reset();
+        path.add(copy);
+        return true;
+    }
+
+    private static void removeCyclePathKey(Set<IAEItemStack> path,
+                                           IAEItemStack key) {
+        IAEItemStack found = null;
+        for (IAEItemStack candidate : path) {
+            if (sameKey(candidate, key)) {
+                found = candidate;
+                break;
+            }
+        }
+        if (found != null) {
+            path.remove(found);
+        }
     }
 
     private boolean hasAvailable(IAEItemStack key) {
@@ -1128,18 +2526,11 @@ public final class CraftingCalculator {
             result.addAll(grid.getCraftingFor(key, null, -1, world));
         }
 
-        if (AE2FluidCraftCompat.isFluidFakeItem(
-                key == null ? null : key.getDefinition())) {
-            long[] queryAmounts = new long[]{amountHint, key.getStackSize(), 1000L, 1L};
-            for (long queryAmount : queryAmounts) {
-                if (queryAmount <= 0L) {
-                    continue;
-                }
-                IAEItemStack packet = AE2FluidCraftCompat.packFluidPacket(
-                        key, queryAmount);
-                if (packet != null && !packet.isSameType(key)) {
-                    result.addAll(grid.getCraftingFor(packet, null, -1, world));
-                }
+        if (AE2FluidCraftCompat.isFluidFakeItem(key)) {
+            IAEItemStack packet = AE2FluidCraftCompat.packFluidPacket(
+                    key, amountHint);
+            if (packet != null && !packet.isSameType(key)) {
+                result.addAll(grid.getCraftingFor(packet, null, -1, world));
             }
         }
         return result;
@@ -1157,28 +2548,28 @@ public final class CraftingCalculator {
             return false;
         }
 
-        long[] queryAmounts = new long[]{amountHint, key.getStackSize(), 1000L, 1L};
-        for (long queryAmount : queryAmounts) {
-            if (queryAmount <= 0L) {
-                continue;
-            }
-            IAEItemStack packet = AE2FluidCraftCompat.packFluidPacket(
-                    key, queryAmount);
-            if (packet != null && grid.canEmitFor(packet)) {
-                return true;
-            }
+        IAEItemStack packet = AE2FluidCraftCompat.packFluidPacket(
+                key, amountHint);
+        if (packet != null && grid.canEmitFor(packet)) {
+            return true;
         }
         return false;
     }
 
     private static boolean isFluidKey(IAEItemStack key) {
-        return AE2FluidCraftCompat.isFluidFakeItem(
-                key == null ? null : key.getDefinition());
+        return AE2FluidCraftCompat.isFluidFakeItem(key);
     }
 
     private void provideExternal(IAEItemStack key, long amount) {
         if (amount <= 0L) {
             return;
+        }
+        if (isFluidKey(key)) {
+            AE2QuickCalculation.LOGGER.info(
+                    "[QCALC][{}] fluid provided externally key={} amount={}",
+                    debugTag,
+                    AE2FluidCraftCompat.debugStack(key),
+                    amount);
         }
         insertInternal(key, amount);
         addCount(emittedItems, key, amount);
@@ -1199,6 +2590,16 @@ public final class CraftingCalculator {
 
         long total = fromInternal + fromNetwork;
         addBytes(total);
+        if (isFluidKey(key)) {
+            AE2QuickCalculation.LOGGER.info(
+                    "[QCALC][{}] fluid extract key={} required={} internal={} network={} total={}",
+                    debugTag,
+                    AE2FluidCraftCompat.debugStack(key),
+                    required,
+                    fromInternal,
+                    fromNetwork,
+                    total);
+        }
         return total;
     }
 
@@ -1286,6 +2687,10 @@ public final class CraftingCalculator {
             return false;
         }
 
+        IAEItemStack[] outputs = getCalculationOutputs(pattern);
+        IAEItemStack[] condensedOutputs =
+                getCalculationOutputsFromCondensed(pattern);
+
         for (IAEItemStack input : inputs) {
             if (input == null || input.getStackSize() <= 0L) {
                 continue;
@@ -1296,13 +2701,24 @@ public final class CraftingCalculator {
             }
 
             ContainerInfo container = inspectContainer(input);
+            if (container == null || container.durability == null) {
+                ContainerInfo nbtContainer = findPatternDurabilityContainer(
+                        input, outputs);
+                if (nbtContainer == null) {
+                    nbtContainer = findPatternDurabilityContainer(input,
+                            condensedOutputs);
+                }
+                if (nbtContainer != null) {
+                    container = nbtContainer;
+                }
+            }
             if (item.hasContainerItem(input.getDefinition()) && container == null) {
                 // Treat an unrecognised container transition as consumed input
                 // would be incorrect, so leave it to AE2's native path.
                 return false;
             }
 
-            if (container != null
+            if (container != null && container.durability == null
                     && !sameReusableContainer(input, container.stack)
                     && !pattern.isCraftable()) {
                 // AE2's 1.12 processing executor does not return container
@@ -1316,6 +2732,11 @@ public final class CraftingCalculator {
                         || input.getStackSize() != 1L) {
                     return false;
                 }
+            }
+
+            if (container != null && container.durability != null
+                    && input.getStackSize() != 1L) {
+                return false;
             }
         }
         return true;
@@ -1342,6 +2763,72 @@ public final class CraftingCalculator {
     private static IAEItemStack[] getCalculationOutputsFromCondensed(
             ICraftingPatternDetails pattern) {
         return normalizeAndCondense(pattern.getCondensedOutputs());
+    }
+
+    private static IAEItemStack[] safeInputs(ICraftingPatternDetails pattern) {
+        if (pattern == null) {
+            return null;
+        }
+        try {
+            return pattern.getInputs();
+        } catch (Throwable failure) {
+            return null;
+        }
+    }
+
+    private static IAEItemStack[] safeCondensedInputs(
+            ICraftingPatternDetails pattern) {
+        if (pattern == null) {
+            return null;
+        }
+        try {
+            return pattern.getCondensedInputs();
+        } catch (Throwable failure) {
+            return null;
+        }
+    }
+
+    private static IAEItemStack[] safeOutputs(ICraftingPatternDetails pattern) {
+        if (pattern == null) {
+            return null;
+        }
+        try {
+            return pattern.getOutputs();
+        } catch (Throwable failure) {
+            return null;
+        }
+    }
+
+    private static IAEItemStack[] safeCondensedOutputs(
+            ICraftingPatternDetails pattern) {
+        if (pattern == null) {
+            return null;
+        }
+        try {
+            return pattern.getCondensedOutputs();
+        } catch (Throwable failure) {
+            return null;
+        }
+    }
+
+    private static String safeArray(IAEItemStack[] stacks) {
+        try {
+            return AE2FluidCraftCompat.debugArray(stacks);
+        } catch (Throwable failure) {
+            return "<diagnostic-error:" + failure.getClass().getSimpleName() + ">";
+        }
+    }
+
+    private static boolean containsFluid(IAEItemStack[] stacks) {
+        if (stacks == null) {
+            return false;
+        }
+        for (IAEItemStack stack : stacks) {
+            if (AE2FluidCraftCompat.isFluidFakeItem(stack)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static IAEItemStack[] normalizeAndCondense(IAEItemStack[] stacks) {
@@ -1383,34 +2870,130 @@ public final class CraftingCalculator {
 
     private static ContainerInfo inspectContainer(IAEItemStack input) {
         Item item = input.getItem();
-        if (item == null || !item.hasContainerItem(input.getDefinition())) {
+        if (item == null) {
             return null;
         }
 
         ItemStack source = input.copy().setStackSize(1).createItemStack();
-        ItemStack container = Platform.getContainerItem(source.copy());
-        if (container == null || container.isEmpty()) {
+        if (source == null || source.isEmpty()) {
+            return null;
+        }
+        boolean declaresContainer = item.hasContainerItem(source);
+        ItemStack container = getReturnedContainer(item, source);
+        ContainerInfo direct = null;
+        if (container != null && !container.isEmpty()) {
+            IAEItemStack returned = AEItemStack.fromItemStack(container);
+            direct = inspectReturnedContainer(input, returned, null);
+            if (direct != null && direct.durability != null) {
+                return direct;
+            }
+        }
+
+        // Some custom tools create their first wear field only when they are
+        // damaged. Probe those pristine states with a small semantic field
+        // allowlist, then require the returned stack to prove a single NBT
+        // transition and a finite endpoint before accepting it as durability.
+        // Do not synthesize dozens of NBT fields for every ordinary item. A
+        // missing container declaration cannot become a safe reusable tool by
+        // guessing arbitrary NBT keys; recipe-specific probing handles the
+        // exceptional integrations that explicitly return a remainder.
+        if (!declaresContainer && (container == null || container.isEmpty())) {
+            return direct;
+        }
+
+        NbtDurabilityTransition synthetic =
+                findSyntheticNbtDurabilityTransition(source, input);
+        if (synthetic != null) {
+            return new ContainerInfo(synthetic.output, synthetic.durability);
+        }
+        return direct;
+    }
+
+    private static ItemStack getReturnedContainer(Item item, ItemStack source) {
+        if (item == null || source == null || source.isEmpty()) {
+            return ItemStack.EMPTY;
+        }
+        try {
+            // Read the item's transition directly first. Platform's helper
+            // applies the vanilla ItemStack damage limit and may discard a
+            // valid custom-NBT transition before the caller can inspect it.
+            ItemStack direct = item.getContainerItem(source.copy());
+            if (direct != null && !direct.isEmpty()) {
+                return direct;
+            }
+            if (item.hasContainerItem(source)) {
+                return Platform.getContainerItem(source.copy());
+            }
+            return ItemStack.EMPTY;
+        } catch (Throwable failure) {
+            return ItemStack.EMPTY;
+        }
+    }
+
+    private static NbtDurabilityTransition findSyntheticNbtDurabilityTransition(
+            ItemStack source,
+            IAEItemStack original) {
+        if (source == null || source.isEmpty() || original == null) {
             return null;
         }
 
-        DurabilityInfo durability = null;
-        if (isDamageableItem(item)) {
-            int currentDamage = source.getItemDamage();
-            int maxDamage = source.getMaxDamage();
-            int nextDamage = container.getItemDamage();
-            if (container.getItem() != item
-                    || !ItemStack.areItemStackTagsEqual(source, container)
-                    || maxDamage <= currentDamage
-                    || nextDamage <= currentDamage
-                    || nextDamage > maxDamage
-                    || nextDamage - currentDamage != 1) {
-                return null;
-            }
-            durability = new DurabilityInfo(maxDamage, nextDamage - currentDamage);
-        }
+        List<NbtPath> paths = new ArrayList<NbtPath>();
+        collectMissingDurabilityPaths(source.getTagCompound(),
+                new ArrayList<String>(), paths);
+        for (NbtPath path : paths) {
+            for (NbtNumberType type : NbtNumberType.values()) {
+                ItemStack probe = source.copy();
+                NBTTagCompound tag = probe.getTagCompound();
+                if (tag == null) {
+                    tag = new NBTTagCompound();
+                    probe.setTagCompound(tag);
+                }
+                if (!setTagAtPath(tag, path, type.write(0L))) {
+                    continue;
+                }
 
-        IAEItemStack stack = AEItemStack.fromItemStack(container);
-        return stack == null ? null : new ContainerInfo(stack, durability);
+                ItemStack returned = getReturnedContainer(
+                        source.getItem(), probe);
+                if (returned == null || returned.isEmpty()) {
+                    continue;
+                }
+                IAEItemStack returnedStack = AEItemStack.fromItemStack(
+                        returned);
+                NbtDurabilityTransition transition =
+                        findNbtDurabilityTransition(original, returnedStack,
+                                null);
+                if (transition != null) {
+                    return transition;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static void collectMissingDurabilityPaths(
+            NBTTagCompound tag,
+            List<String> prefix,
+            List<NbtPath> result) {
+        for (String fieldName : NBT_DURABILITY_FIELD_NAMES) {
+            List<String> candidate = new ArrayList<String>(prefix);
+            candidate.add(fieldName);
+            NbtPath path = new NbtPath(candidate);
+            if (getTagAtPath(tag, path) == null) {
+                result.add(path);
+            }
+        }
+        if (tag == null) {
+            return;
+        }
+        for (String key : tag.getKeySet()) {
+            NBTBase value = tag.getTag(key);
+            if (value instanceof NBTTagCompound) {
+                List<String> childPrefix = new ArrayList<String>(prefix);
+                childPrefix.add(key);
+                collectMissingDurabilityPaths((NBTTagCompound) value,
+                        childPrefix, result);
+            }
+        }
     }
 
     private static int[] findInputSlots(ICraftingPatternDetails pattern,
@@ -1454,7 +3037,9 @@ public final class CraftingCalculator {
     }
 
     private static boolean isDamageableItem(Item item) {
-        return item != null && (item.isDamageable() || Platform.isGTDamageableItem(item));
+        // NBT-backed wear is detected from the pattern transition itself;
+        // do not depend on a mod-specific item class or API here.
+        return item != null && item.isDamageable();
     }
 
     private static long divideRoundUp(long required, long perCraft) {
@@ -1519,6 +3104,12 @@ public final class CraftingCalculator {
     private static CalculationFallbackException unsupported(FallbackReason reason,
                                                               String message) {
         return new CalculationFallbackException(reason, message);
+    }
+
+    /** Creates a controlled fallback for the root integration bridge. */
+    public static CalculationFallbackException fallback(FallbackReason reason,
+                                                          String message) {
+        return unsupported(reason, message);
     }
 
     /** Reasons that are safe to expose to the localized status overlay. */
@@ -1641,6 +3232,24 @@ public final class CraftingCalculator {
         }
     }
 
+    private static final class CycleSearchBudget {
+        private int remaining;
+
+        private CycleSearchBudget(int remaining) {
+            this.remaining = remaining;
+        }
+
+        private boolean consume() {
+            return remaining-- > 0;
+        }
+    }
+
+    private enum CycleDependencyStatus {
+        SAFE,
+        ACTIVE,
+        UNPROVABLE
+    }
+
     private static final class Fraction {
         private static final Fraction ONE = new Fraction(
                 BigInteger.ONE, BigInteger.ONE);
@@ -1735,19 +3344,230 @@ public final class CraftingCalculator {
     }
 
     private static final class DurabilityInfo {
-        private final int maxDamage;
-        private final int damageStep;
+        private final long maxDamage;
+        private final long damageStep;
+        private final NbtPath nbtPath;
+        private final NbtNumberType nbtType;
 
         private DurabilityInfo(int maxDamage, int damageStep) {
-            this.maxDamage = maxDamage;
-            this.damageStep = damageStep;
+            this((long) maxDamage, (long) damageStep, null, null);
         }
 
-        private long capacity(int damage) {
-            if (damage < 0 || damage >= maxDamage || damageStep <= 0) {
+        private DurabilityInfo(long maxDamage,
+                               long damageStep,
+                               NbtPath nbtPath,
+                               NbtNumberType nbtType) {
+            this.maxDamage = maxDamage;
+            this.damageStep = damageStep;
+            this.nbtPath = nbtPath;
+            this.nbtType = nbtType;
+        }
+
+        private static DurabilityInfo nbt(long maxDamage,
+                                          long damageStep,
+                                          NbtPath path,
+                                          NbtNumberType type) {
+            return new DurabilityInfo(maxDamage, damageStep, path, type);
+        }
+
+        private boolean isNbt() {
+            return nbtPath != null;
+        }
+
+        private long currentDamage(IAEItemStack stack) {
+            if (stack == null) {
                 return 0L;
             }
-            return (maxDamage - (long) damage) / damageStep;
+            ItemStack itemStack = stack.copy().setStackSize(1).createItemStack();
+            return currentDamage(itemStack);
+        }
+
+        private long currentDamage(ItemStack stack) {
+            if (stack == null || stack.isEmpty()) {
+                return -1L;
+            }
+            if (!isNbt()) {
+                return stack.getItemDamage();
+            }
+            NBTBase value = getTagAtPath(stack.getTagCompound(), nbtPath);
+            if (value == null) {
+                // A missing numeric field is the zero-damage state. This is
+                // needed for tools whose pristine stack omits Dmg entirely.
+                return 0L;
+            }
+            return readNumericValue(value) == null
+                    ? -1L : readNumericValue(value).longValue();
+        }
+
+        private long capacity(IAEItemStack stack) {
+            long damage = currentDamage(stack);
+            if (damage < 0L || damage >= maxDamage || damageStep <= 0L) {
+                return 0L;
+            }
+            return (maxDamage - damage) / damageStep;
+        }
+
+        private boolean sameTransition(DurabilityInfo other) {
+            if (other == null || maxDamage != other.maxDamage
+                    || damageStep != other.damageStep) {
+                return false;
+            }
+            if (nbtPath == null || other.nbtPath == null) {
+                return nbtPath == other.nbtPath;
+            }
+            return nbtType == other.nbtType
+                    && Arrays.equals(nbtPath.parts, other.nbtPath.parts);
+        }
+
+        private boolean matchesReturned(IAEItemStack input,
+                                        IAEItemStack returned) {
+            if (!isNbt() || input == null || returned == null
+                    || !sameItemAndDamage(input, returned)) {
+                return false;
+            }
+            ItemStack inputStack = input.copy().setStackSize(1).createItemStack();
+            ItemStack returnedStack = returned.copy().setStackSize(1)
+                    .createItemStack();
+            long inputDamage = currentDamage(inputStack);
+            long returnedDamage = currentDamage(returnedStack);
+            if (inputDamage < 0L || returnedDamage < 0L
+                    || inputDamage > LONG_MAX - damageStep) {
+                return false;
+            }
+            return returnedDamage == inputDamage + damageStep
+                    && sameNbtExceptPath(inputStack.getTagCompound(),
+                    returnedStack.getTagCompound(), nbtPath);
+        }
+
+        @Override
+        public String toString() {
+            return isNbt() ? String.valueOf(nbtPath) : "item_damage";
+        }
+    }
+
+    private static final class NbtDurabilityTransition {
+        private final DurabilityInfo durability;
+        private final IAEItemStack output;
+
+        private NbtDurabilityTransition(DurabilityInfo durability,
+                                        IAEItemStack output) {
+            this.durability = durability;
+            this.output = output;
+        }
+    }
+
+    private interface NbtMaxDamageResolver {
+        long resolve(ItemStack input,
+                     ItemStack output,
+                     NbtPath path,
+                     NbtNumberType type,
+                     long step);
+    }
+
+    private static final class NbtPath {
+        private final String[] parts;
+
+        private NbtPath(List<String> parts) {
+            this.parts = parts.toArray(new String[parts.size()]);
+        }
+
+        @Override
+        public String toString() {
+            return Arrays.toString(parts);
+        }
+    }
+
+    private enum NbtNumberType {
+        BYTE,
+        SHORT,
+        INT,
+        LONG,
+        FLOAT,
+        DOUBLE;
+
+        private static NbtNumberType from(NBTBase value) {
+            if (value instanceof NBTTagByte) {
+                return BYTE;
+            }
+            if (value instanceof NBTTagShort) {
+                return SHORT;
+            }
+            if (value instanceof NBTTagInt) {
+                return INT;
+            }
+            if (value instanceof NBTTagLong) {
+                return LONG;
+            }
+            if (value instanceof NBTTagFloat) {
+                return FLOAT;
+            }
+            if (value instanceof NBTTagDouble) {
+                return DOUBLE;
+            }
+            return null;
+        }
+
+        private Long read(NBTBase value) {
+            double asDouble;
+            switch (this) {
+                case BYTE:
+                    return Long.valueOf(((NBTTagByte) value).getByte());
+                case SHORT:
+                    return Long.valueOf(((NBTTagShort) value).getShort());
+                case INT:
+                    return Long.valueOf(((NBTTagInt) value).getInt());
+                case LONG:
+                    return Long.valueOf(((NBTTagLong) value).getLong());
+                case FLOAT:
+                    asDouble = ((NBTTagFloat) value).getFloat();
+                    break;
+                case DOUBLE:
+                    asDouble = ((NBTTagDouble) value).getDouble();
+                    break;
+                default:
+                    return null;
+            }
+            if (Double.isNaN(asDouble) || Double.isInfinite(asDouble)
+                    || asDouble != Math.rint(asDouble)
+                    || asDouble < Long.MIN_VALUE
+                    || asDouble > Long.MAX_VALUE) {
+                return null;
+            }
+            return Long.valueOf((long) asDouble);
+        }
+
+        private NBTBase write(long value) {
+            switch (this) {
+                case BYTE:
+                    if (value < Byte.MIN_VALUE || value > Byte.MAX_VALUE) {
+                        return null;
+                    }
+                    return new NBTTagByte((byte) value);
+                case SHORT:
+                    if (value < Short.MIN_VALUE || value > Short.MAX_VALUE) {
+                        return null;
+                    }
+                    return new NBTTagShort((short) value);
+                case INT:
+                    if (value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) {
+                        return null;
+                    }
+                    return new NBTTagInt((int) value);
+                case LONG:
+                    return new NBTTagLong(value);
+                case FLOAT:
+                    float asFloat = (float) value;
+                    return Float.isInfinite(asFloat) || Float.isNaN(asFloat)
+                            || (long) asFloat != value
+                            ? null : new NBTTagFloat(asFloat);
+                case DOUBLE:
+                    double asDouble = (double) value;
+                    return Double.isInfinite(asDouble) || Double.isNaN(asDouble)
+                            || (long) asDouble != value
+                            ? null : new NBTTagDouble(asDouble);
+                default:
+                    return null;
+            }
         }
     }
 
@@ -1863,6 +3683,7 @@ public final class CraftingCalculator {
         private final IItemList<IAEItemStack> emittedItems;
         private final Map<ICraftingPatternDetails, Long> patternTimes;
         private final boolean cycleOptimized;
+        private final String debugTag;
 
         private Result(IAEItemStack output,
                        long bytes,
@@ -1870,7 +3691,8 @@ public final class CraftingCalculator {
                        IItemList<IAEItemStack> missingItems,
                        IItemList<IAEItemStack> emittedItems,
                        Map<ICraftingPatternDetails, Long> patternTimes,
-                       boolean cycleOptimized) {
+                       boolean cycleOptimized,
+                       String debugTag) {
             this.output = output;
             this.bytes = bytes;
             this.usedItems = usedItems;
@@ -1878,6 +3700,7 @@ public final class CraftingCalculator {
             this.emittedItems = emittedItems;
             this.patternTimes = new LinkedHashMap<ICraftingPatternDetails, Long>(patternTimes);
             this.cycleOptimized = cycleOptimized;
+            this.debugTag = debugTag == null ? "unbound" : debugTag;
         }
 
         public static Result direct(IAEItemStack output, long amount, boolean external) {
@@ -1898,7 +3721,8 @@ public final class CraftingCalculator {
             IAEItemStack finalOutput = key.copy();
             finalOutput.setStackSize(amount);
             return new Result(finalOutput, amount, used, missing, emitted,
-                    new LinkedHashMap<ICraftingPatternDetails, Long>(), false);
+                    new LinkedHashMap<ICraftingPatternDetails, Long>(), false,
+                    "direct");
         }
 
         public boolean hasMissingItems() {
@@ -1917,6 +3741,10 @@ public final class CraftingCalculator {
             return bytes;
         }
 
+        public int getPatternCount() {
+            return patternTimes.size();
+        }
+
         public IItemList<IAEItemStack> getUsedItems() {
             return usedItems;
         }
@@ -1930,6 +3758,13 @@ public final class CraftingCalculator {
         }
 
         public void populatePlan(IItemList<IAEItemStack> plan) {
+            AE2QuickCalculation.LOGGER.info(
+                    "[QCALC][{}] populatePlan missing={} used={} emitted={} patterns={}",
+                    debugTag,
+                    AE2FluidCraftCompat.debugList(missingItems, false),
+                    AE2FluidCraftCompat.debugList(usedItems, false),
+                    AE2FluidCraftCompat.debugList(emittedItems, false),
+                    patternTimes.size());
             for (IAEItemStack missing : missingItems) {
                 addPlanStorage(plan, missing);
             }
@@ -1937,7 +3772,7 @@ public final class CraftingCalculator {
                 addPlanStorage(plan, used);
             }
             for (IAEItemStack emitted : emittedItems) {
-                IAEItemStack requestable = normalizeForCalculation(emitted);
+                IAEItemStack requestable = normalizeForPlan(emitted);
                 if (requestable == null) {
                     continue;
                 }
@@ -1954,7 +3789,7 @@ public final class CraftingCalculator {
                     if (output == null || output.getStackSize() <= 0L) {
                         continue;
                     }
-                    IAEItemStack requestable = normalizeForCalculation(output);
+                    IAEItemStack requestable = normalizeForPlan(output);
                     if (requestable == null) {
                         continue;
                     }
@@ -1966,8 +3801,8 @@ public final class CraftingCalculator {
         }
 
         private static void addPlanStorage(IItemList<IAEItemStack> plan,
-                                           IAEItemStack stack) {
-            IAEItemStack normalized = normalizeForCalculation(stack);
+                                            IAEItemStack stack) {
+            IAEItemStack normalized = normalizeForPlan(stack);
             if (normalized == null || normalized.getStackSize() <= 0L) {
                 return;
             }
@@ -1976,9 +3811,26 @@ public final class CraftingCalculator {
             plan.add(normalized);
         }
 
+        private static IAEItemStack normalizeForPlan(IAEItemStack stack) {
+            if (stack == null) {
+                return null;
+            }
+            IAEItemStack normalized = normalizeForCalculation(stack);
+            // A calculation cannot silently lose a deficit. Invalid AE2FC
+            // data is normally rejected before a Result is created, but keep
+            // the original key here as a final planning invariant.
+            return normalized == null ? stack.copy() : normalized;
+        }
+
         public void apply(MECraftingInventory storage,
                           CraftingCPUCluster cpu,
                           IActionSource source) throws CraftBranchFailure {
+            AE2QuickCalculation.LOGGER.info(
+                    "[QCALC][{}] apply used={} emitted={} patterns={}",
+                    debugTag,
+                    AE2FluidCraftCompat.debugList(usedItems, false),
+                    AE2FluidCraftCompat.debugList(emittedItems, false),
+                    patternTimes.size());
             // Validate the complete extraction set before mutating the
             // transaction inventory, matching CraftingTreeNode's two-phase behavior.
             for (IAEItemStack used : usedItems) {
@@ -1986,6 +3838,11 @@ public final class CraftingCalculator {
                 IAEItemStack extracted = storage.extractItems(
                         request, Actionable.SIMULATE, source);
                 if (extracted == null || extracted.getStackSize() != request.getStackSize()) {
+                    AE2QuickCalculation.LOGGER.warn(
+                            "[QCALC][{}] apply simulation extraction failed request={} extracted={}",
+                            debugTag,
+                            AE2FluidCraftCompat.debugStack(request),
+                            AE2FluidCraftCompat.debugStack(extracted));
                     throw new CraftBranchFailure(request, request.getStackSize());
                 }
             }
@@ -1994,6 +3851,11 @@ public final class CraftingCalculator {
                 IAEItemStack extracted = storage.extractItems(
                         request, Actionable.MODULATE, source);
                 if (extracted == null || extracted.getStackSize() != request.getStackSize()) {
+                    AE2QuickCalculation.LOGGER.warn(
+                            "[QCALC][{}] apply modulation extraction failed request={} extracted={}",
+                            debugTag,
+                            AE2FluidCraftCompat.debugStack(request),
+                            AE2FluidCraftCompat.debugStack(extracted));
                     throw new CraftBranchFailure(request, request.getStackSize());
                 }
                 cpu.addStorage(extracted);

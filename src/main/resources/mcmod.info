@@ -11,6 +11,7 @@
   "credits": "Applied Energistics 2 and Forge communities",
   "logoFile": "",
   "screenshots": [],
-  "dependencies": ["appliedenergistics2", "mixinbooter"]
+  "dependencies": ["appliedenergistics2", "mixinbooter"],
+  "acceptableRemoteVersions": "*"
 }
 ]
