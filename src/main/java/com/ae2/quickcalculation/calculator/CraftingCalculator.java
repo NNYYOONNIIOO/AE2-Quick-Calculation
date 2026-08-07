@@ -1042,6 +1042,8 @@ public final class CraftingCalculator {
         }
 
         boolean packageConsumesInputs = PackagedAutoCompat.consumesAllInputs(pattern);
+        boolean implicitCraftingRemainders =
+                usesImplicitCraftingRemainders(pattern);
         if (packageConsumesInputs) {
             AE2QuickCalculation.LOGGER.info(
                     "[QCALC][{}] applying PackagedAuto package input semantics pattern={}",
@@ -1058,9 +1060,12 @@ public final class CraftingCalculator {
             if (input == null || input.getStackSize() <= 0L) {
                 continue;
             }
-            // PackagedAuto's package machine shrinks its input stacks directly.
-            // Container returns and tool damage are not applied by that machine.
-            ContainerInfo container = packageConsumesInputs ? null : inspectContainer(input);
+            // Processing patterns hand their encoded inputs to an external
+            // machine. AE2 does not apply Item#getContainerItem() on that
+            // path; only an explicit pattern output can return a catalyst or
+            // a worn tool. Vanilla crafting patterns use recipe remainders.
+            ContainerInfo container = implicitCraftingRemainders
+                    ? inspectContainer(input) : null;
             boolean returnedByPattern = false;
             int[] slots = findInputSlots(pattern, input);
 
@@ -1069,7 +1074,8 @@ public final class CraftingCalculator {
             // the requested result. Read the recipe remainder before looking
             // at pattern outputs so a tool that is returned in a damaged NBT
             // state is not mistaken for a consumed input.
-            if (!packageConsumesInputs && (container == null || container.durability == null)
+            if (implicitCraftingRemainders
+                    && (container == null || container.durability == null)
                     && shouldProbeRecipeContainer(input)) {
                 ContainerInfo recipeContainer = inspectRecipeContainer(
                         pattern, input, slots);
@@ -2724,7 +2730,8 @@ public final class CraftingCalculator {
         IAEItemStack[] condensedOutputs =
                 getCalculationOutputsFromCondensed(pattern);
 
-        boolean packageConsumesInputs = PackagedAutoCompat.consumesAllInputs(pattern);
+        boolean implicitCraftingRemainders =
+                usesImplicitCraftingRemainders(pattern);
         for (IAEItemStack input : inputs) {
             if (input == null || input.getStackSize() <= 0L) {
                 continue;
@@ -2734,9 +2741,16 @@ public final class CraftingCalculator {
                 return false;
             }
 
-            ContainerInfo container = packageConsumesInputs ? null : inspectContainer(input);
-            if (!packageConsumesInputs
-                    && (container == null || container.durability == null)) {
+            if (!implicitCraftingRemainders) {
+                // Processing patterns consume their encoded inputs unless a
+                // matching return is explicitly present in getOutputs().
+                // Their external machine, not AE2's crafting executor,
+                // owns any Item#getContainerItem() behavior.
+                continue;
+            }
+
+            ContainerInfo container = inspectContainer(input);
+            if (container == null || container.durability == null) {
                 ContainerInfo nbtContainer = findPatternDurabilityContainer(
                         input, outputs);
                 if (nbtContainer == null) {
@@ -2747,37 +2761,36 @@ public final class CraftingCalculator {
                     container = nbtContainer;
                 }
             }
-            if (!packageConsumesInputs
-                    && item.hasContainerItem(input.getDefinition()) && container == null) {
+            if (item.hasContainerItem(input.getDefinition()) && container == null) {
                 // Treat an unrecognised container transition as consumed input
                 // would be incorrect, so leave it to AE2's native path.
                 return false;
             }
 
-            if (!packageConsumesInputs
-                    && container != null && container.durability == null
-                    && !sameReusableContainer(input, container.stack)
-                    && !pattern.isCraftable()) {
-                // AE2's 1.12 processing executor does not return container
-                // items after a processing operation. Vanilla crafting does,
-                // so only that path can safely provide a different container.
-                return false;
-            }
-
-            if (!packageConsumesInputs && isDamageableItem(item)) {
+            if (isDamageableItem(item)) {
                 if (container == null || container.durability == null
                         || input.getStackSize() != 1L) {
                     return false;
                 }
             }
 
-            if (!packageConsumesInputs
-                    && container != null && container.durability != null
+            if (container != null && container.durability != null
                     && input.getStackSize() != 1L) {
                 return false;
             }
         }
         return true;
+    }
+
+    /**
+     * Only AE2's crafting-grid patterns execute vanilla recipe remainders.
+     * Processing patterns are fulfilled by an external machine, so their
+     * encoded output list is the sole authoritative source of returns.
+     */
+    private static boolean usesImplicitCraftingRemainders(
+            ICraftingPatternDetails pattern) {
+        return pattern != null && pattern.isCraftable()
+                && !PackagedAutoCompat.consumesAllInputs(pattern);
     }
 
     private static IAEItemStack[] getCalculationInputs(

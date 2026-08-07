@@ -57,6 +57,7 @@ public final class CraftingCalculatorStressTest {
             verifyMissingItemsArePreservedInPlan();
             verifyPartialMissingItemsArePreservedInPlan();
             verifyPackagedAutoContainerInputsAreConsumed();
+            verifyProcessingContainerInputsAreConsumed();
             System.out.println("CraftingCalculator missing-plan test passed");
             return;
         }
@@ -64,6 +65,7 @@ public final class CraftingCalculatorStressTest {
         runChain("50k-depth chain", 50_000);
         verifyQuantityOverflowIsRejected();
         verifyPackagedAutoContainerInputsAreConsumed();
+        verifyProcessingContainerInputsAreConsumed();
         System.out.println("CraftingCalculatorStressTest passed");
     }
 
@@ -239,6 +241,45 @@ public final class CraftingCalculatorStressTest {
         require(result.getUsedItems().findPrecise(AEItemStack.fromItemStack(
                 new ItemStack(returnedContainer, 1, 0))) == null,
                 "PackagedAuto package pattern incorrectly returned a container item");
+    }
+
+    private static void verifyProcessingContainerInputsAreConsumed() {
+        Item returnedContainer = new Item();
+        Item consumedContainer = new ConsumedContainerItem(returnedContainer);
+        Item intermediateItem = new Item();
+        Item outputItem = new Item();
+
+        IAEItemStack processingInput = AEItemStack.fromItemStack(
+                new ItemStack(consumedContainer, 1, 0));
+        IAEItemStack intermediate = AEItemStack.fromItemStack(
+                new ItemStack(intermediateItem, 1, 0));
+        IAEItemStack output = AEItemStack.fromItemStack(
+                new ItemStack(outputItem, 1, 0));
+
+        // This reproduces the recursive candidate preflight: the root is
+        // active while the processing pattern's container input is resolved.
+        ChainPattern processingPattern = new ChainPattern(intermediate, processingInput);
+        ChainPattern rootPattern = new ChainPattern(output, intermediate);
+        Map<IAEItemStack, ICraftingPatternDetails> byOutput =
+                new HashMap<IAEItemStack, ICraftingPatternDetails>();
+        byOutput.put(intermediate, processingPattern);
+        byOutput.put(output, rootPattern);
+
+        IItemList<IAEItemStack> stock = AEApi.instance().storage()
+                .getStorageChannel(IItemStorageChannel.class).createList();
+        stock.add(processingInput.copy().setStackSize(5L));
+        CraftingCalculator.Result result = new CraftingCalculator(
+                new StressGrid(null, byOutput), null).calculate(
+                rootPattern, 5L, new MECraftingInventory(stock));
+
+        require(!result.hasMissingItems(),
+                "processing container pattern reported missing inputs");
+        IAEItemStack consumed = result.getUsedItems().findPrecise(processingInput);
+        require(consumed != null && consumed.getStackSize() == 5L,
+                "processing container input was not consumed exactly once per craft");
+        require(result.getUsedItems().findPrecise(AEItemStack.fromItemStack(
+                new ItemStack(returnedContainer, 1, 0))) == null,
+                "processing container input was treated as an implicit return");
     }
 
     private static String formatMillis(long nanos) {
