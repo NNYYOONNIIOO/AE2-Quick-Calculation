@@ -16,6 +16,7 @@ import appeng.me.cluster.implementations.CraftingCPUCluster;
 import appeng.util.inv.ItemListIgnoreCrafting;
 import com.ae2.quickcalculation.calculator.CraftingCalculator;
 import com.ae2.quickcalculation.AE2QuickCalculation;
+import com.ae2.quickcalculation.config.AE2QuickCalculationConfig;
 import com.ae2.quickcalculation.compat.AE2FluidCraftCompat;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.world.World;
@@ -498,6 +499,9 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
     }
 
     private void reportTerminalStatus(IActionSource source, String message) {
+        if (!AE2QuickCalculationConfig.shouldShowToast(message)) {
+            return;
+        }
         if (terminalStatusReported) {
             return;
         }

@@ -1,6 +1,7 @@
 package com.ae2.quickcalculation;
 
 import com.ae2.quickcalculation.calculator.CraftingCalculator;
+import com.ae2.quickcalculation.config.AE2QuickCalculationConfig;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.common.SidedProxy;
 import net.minecraftforge.fml.common.event.FMLPreInitializationEvent;
@@ -22,7 +23,7 @@ import org.apache.logging.log4j.Logger;
 public final class AE2QuickCalculation {
     public static final String MOD_ID = "ae2_quick_calculation";
     public static final String NAME = "AE2 Quick Calculation";
-    public static final String VERSION = "1.0.0";
+    public static final String VERSION = "1.0.1";
     public static final String TOAST_TITLE = MOD_ID + ".toast.title";
     public static final String TOAST_SEPARATOR = MOD_ID + ".toast.separator";
     public static final String TOAST_ELAPSED = MOD_ID + ".toast.elapsed";
@@ -59,6 +60,8 @@ public final class AE2QuickCalculation {
 
     @Mod.EventHandler
     public void preInit(FMLPreInitializationEvent event) {
+        AE2QuickCalculationConfig.load(event.getSuggestedConfigurationFile());
+        AE2QuickCalculationConfig.applyLoggingConfiguration();
         AE2QuickCalculationNetwork.init();
         PROXY.preInit();
         LOGGER.info("{} {} loaded for AE2 Unofficial Extended Life", NAME, VERSION);
