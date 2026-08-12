@@ -73,6 +73,7 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
     IAEItemStack request(MECraftingInventory inventory, long amount, IActionSource source)
             throws CraftBranchFailure, InterruptedException {
         if (nativeFallback) {
+            CraftingTreeCompatibility.populate(this);
             return super.request(inventory, amount, source);
         }
 
@@ -106,6 +107,7 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
             reportTerminalStatus(source, result.isCycleOptimized()
                     ? AE2QuickCalculation.TOAST_OPTIMIZED_CYCLE
                     : AE2QuickCalculation.TOAST_OPTIMIZED);
+            CraftingTreeCompatibility.populate(this);
             return result.getOutput().copy();
         } catch (CraftingCalculator.QuantityLimitException failure) {
             result = null;
@@ -129,6 +131,7 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
                     debugTag, failure.getReason(), failure.getMessage());
             reportTerminalStatus(source,
                     AE2QuickCalculation.statusFor(failure.getReason()));
+            CraftingTreeCompatibility.populate(this);
             return super.request(inventory, amount, source);
         } catch (RuntimeException failure) {
             nativeFallback = true;
@@ -140,6 +143,7 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
                     "[QCALC][{}] runtime failure type={} detail={}",
                     debugTag, failure.getClass().getName(), failure.getMessage());
             reportTerminalStatus(source, AE2QuickCalculation.TOAST_RUNTIME_FAILURE);
+            CraftingTreeCompatibility.populate(this);
             return super.request(inventory, amount, source);
         }
     }
