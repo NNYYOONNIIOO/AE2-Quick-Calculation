@@ -3792,6 +3792,10 @@ public final class CraftingCalculator {
             return patternTimes.size();
         }
 
+        public Map<ICraftingPatternDetails, Long> getPatternTimes() {
+            return new LinkedHashMap<ICraftingPatternDetails, Long>(patternTimes);
+        }
+
         public IItemList<IAEItemStack> getUsedItems() {
             return usedItems;
         }
