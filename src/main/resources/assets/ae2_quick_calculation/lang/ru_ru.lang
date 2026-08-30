@@ -1,0 +1,17 @@
+ae2_quick_calculation.toast.title=Быстрый расчёт AE2
+ae2_quick_calculation.toast.separator=: 
+ae2_quick_calculation.toast.elapsed=Затрачено: %s мс
+ae2_quick_calculation.toast.optimized=Оптимизированный расчёт завершён
+ae2_quick_calculation.toast.optimized.cycle=Оптимизация продуктивного цикла завершена
+ae2_quick_calculation.toast.fallback=Оптимизация не удалась: используется стандартный расчёт AE2
+ae2_quick_calculation.toast.fallback.unsupported=Оптимизация не удалась: неподдерживаемая семантика шаблона; используется стандартный расчёт AE2
+ae2_quick_calculation.toast.fallback.substitution=Оптимизация не удалась: неподдерживаемая замена или семантика контейнера; используется стандартный расчёт AE2
+ae2_quick_calculation.toast.fallback.container=Оптимизация не удалась: неподдерживаемый контейнер или переход прочности; используется стандартный расчёт AE2
+ae2_quick_calculation.toast.fallback.cycle=Оптимизация не удалась: безопасность цикла не подтверждена; используется стандартный расчёт AE2
+ae2_quick_calculation.toast.fallback.cycle_no_seed=Оптимизация не удалась: в цикле недостаточно исходного материала; используется стандартный расчёт AE2
+ae2_quick_calculation.toast.fallback.cycle_neutral=Оптимизация не удалась: цикл не даёт чистого прироста; используется стандартный расчёт AE2
+ae2_quick_calculation.toast.fallback.cycle_dissipative=Оптимизация не удалась: цикл расходует материал; используется стандартный расчёт AE2
+ae2_quick_calculation.toast.fallback.cycle_complex=Оптимизация не удалась: структура цикла слишком сложная; используется стандартный расчёт AE2
+ae2_quick_calculation.toast.fallback.cycle_external=Оптимизация не удалась: циклу требуются рекурсивные внешние входы; используется стандартный расчёт AE2
+ae2_quick_calculation.toast.runtime_failure=Оптимизация не удалась: сбой выполнения оптимизатора; используется стандартный расчёт AE2
+ae2_quick_calculation.toast.quantity_limit=Оптимизация не удалась: количество превышает лимит версии 1.12.2; расчёт остановлен
