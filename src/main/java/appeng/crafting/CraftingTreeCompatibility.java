@@ -4,6 +4,7 @@ import appeng.api.networking.crafting.ICraftingPatternDetails;
 import appeng.api.storage.data.IAEItemStack;
 import com.ae2.quickcalculation.AE2QuickCalculation;
 import com.ae2.quickcalculation.calculator.CraftingCalculator;
+import com.ae2.quickcalculation.compat.PatternCompat;
 
 import java.lang.reflect.Constructor;
 import java.util.ArrayList;
@@ -283,7 +284,7 @@ public final class CraftingTreeCompatibility {
             return null;
         }
         try {
-            final IAEItemStack output = pattern.getPrimaryOutput();
+            final IAEItemStack output = PatternCompat.getPrimaryOutput(pattern);
             if (output != null && output.getStackSize() > 0L) {
                 return output;
             }
