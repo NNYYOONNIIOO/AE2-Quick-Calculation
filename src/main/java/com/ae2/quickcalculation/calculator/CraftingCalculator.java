@@ -19,6 +19,7 @@ import appeng.util.item.AEItemStack;
 import com.ae2.quickcalculation.AE2QuickCalculation;
 import com.ae2.quickcalculation.compat.AE2FluidCraftCompat;
 import com.ae2.quickcalculation.compat.PackagedAutoCompat;
+import com.ae2.quickcalculation.compat.PatternCompat;
 import net.minecraft.inventory.InventoryCrafting;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
@@ -115,7 +116,7 @@ public final class CraftingCalculator {
         }
 
         IAEItemStack output = normalizeForCalculation(
-                rootPattern.getPrimaryOutput());
+                PatternCompat.getPrimaryOutput(rootPattern));
         if (output == null || output.getStackSize() <= 0) {
             throw unsupported(FallbackReason.INVALID_OUTPUT,
                     "Pattern has no positive primary output");
@@ -166,7 +167,7 @@ public final class CraftingCalculator {
         }
         Deque<PatternFrame> frames = new ArrayDeque<PatternFrame>();
         IAEItemStack rootKey = normalizeForCalculation(
-                rootPattern.pattern.getPrimaryOutput());
+                PatternCompat.getPrimaryOutput(rootPattern.pattern));
         if (rootKey == null) {
             throw unsupported(FallbackReason.INVALID_OUTPUT,
                     "Pattern has no valid primary output");
@@ -305,7 +306,7 @@ public final class CraftingCalculator {
         }
 
         IAEItemStack rootKey = normalizeForCalculation(
-                rootPattern.pattern.getPrimaryOutput());
+                PatternCompat.getPrimaryOutput(rootPattern.pattern));
         if (rootKey == null) {
             throw unsupported(FallbackReason.INVALID_OUTPUT,
                     "Pattern has no valid primary output");

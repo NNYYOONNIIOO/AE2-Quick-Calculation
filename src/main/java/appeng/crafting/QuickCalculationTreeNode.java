@@ -18,6 +18,7 @@ import com.ae2.quickcalculation.calculator.CraftingCalculator;
 import com.ae2.quickcalculation.AE2QuickCalculation;
 import com.ae2.quickcalculation.config.AE2QuickCalculationConfig;
 import com.ae2.quickcalculation.compat.AE2FluidCraftCompat;
+import com.ae2.quickcalculation.compat.PatternCompat;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.world.World;
 import com.ae2.quickcalculation.network.AE2QuickCalculationNetwork;
@@ -255,7 +256,7 @@ public final class QuickCalculationTreeNode extends CraftingTreeNode {
                 candidates.size());
         int candidateIndex = 0;
         for (ICraftingPatternDetails candidate : candidates) {
-            IAEItemStack rawPrimary = candidate.getPrimaryOutput();
+            IAEItemStack rawPrimary = PatternCompat.getPrimaryOutput(candidate);
             IAEItemStack primary = AE2FluidCraftCompat.normalizeFluidItem(
                     rawPrimary);
             AE2QuickCalculation.LOGGER.info(
