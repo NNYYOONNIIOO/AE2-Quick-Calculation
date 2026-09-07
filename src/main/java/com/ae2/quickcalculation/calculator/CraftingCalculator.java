@@ -260,14 +260,54 @@ public final class CraftingCalculator {
                         InputOption option = selectCraftingOption(input);
                         PatternChoice choice = resolvePattern(option.key, input.perCraft);
                         long minimumCopies = Math.min(totalRequired, input.perCraft);
-                        long requestAmount = choice.external || choice.pattern != null
-                                ? missingForParallelBatch
-                                : Math.max(0L, minimumCopies - acquiredForBatch);
-                        if (requestAmount > 0L) {
+
+                        // Only a single serial batch is a hard requirement:
+                        // AE2's executor hands the returned catalyst copy to
+                        // the next craft of this pattern, so one circulating
+                        // seed finishes the whole order (exactly how the
+                        // native tree simulates it, one craft per iteration).
+                        // The rest of the parallel target is a throughput
+                        // optimisation that must not be demanded from the
+                        // crafting tree when it cannot be produced for free.
+                        if (choice.external) {
+                            // External providers add copies without recursing
+                            // into the crafting tree, so ordering the full
+                            // parallel batch from them stays safe.
                             frame.continuation = InputContinuation.normal(
                                     option.key, option.container,
-                                    requestAmount, true);
-                            scheduleRequest(option.key, requestAmount, input.perCraft, frames);
+                                    missingForParallelBatch, true);
+                            provideExternal(option.key, missingForParallelBatch);
+                        } else {
+                            long shortfall = Math.max(0L,
+                                    minimumCopies - acquiredForBatch);
+                            PatternChoice producer = choice;
+                            if (shortfall > 0L && choice.pattern != null
+                                    && catalystNetGain(choice.pattern,
+                                            option.key) <= 0L) {
+                                // A marker pattern returns one copy for every
+                                // craft and therefore can never create the
+                                // missing seed: each of its crafts needs a
+                                // copy before it can hand one back. Ordering
+                                // it used to recurse until the active-key
+                                // guard recorded the marker itself as missing.
+                                // Only a producer that really nets the marker
+                                // can start the chain.
+                                producer = findNetProducer(option.key,
+                                        input.perCraft, choice.pattern);
+                            }
+                            if (shortfall > 0L
+                                    && producer.pattern != null) {
+                                frame.continuation = InputContinuation.normal(
+                                        option.key, option.container,
+                                        shortfall, true);
+                                scheduleChoice(producer, option.key,
+                                        shortfall, frames);
+                            } else if (shortfall > 0L) {
+                                // Even the seed for the first serial craft is
+                                // missing and cannot be crafted by any pattern.
+                                addCount(missingItems, option.key, shortfall);
+                                addBytes(shortfall);
+                            }
                         }
                     }
                 }
@@ -666,6 +706,33 @@ public final class CraftingCalculator {
         return false;
     }
 
+    /**
+     * Net number of copies of {@code key} that one craft of this pattern adds
+     * to the ledger after its own returned-catalyst copies are accounted for.
+     * A marker pattern (input X -> output X + product) hands back exactly the
+     * copy it consumed, so its gain is zero: no number of its crafts can ever
+     * increase the available stock of the marker.
+     */
+    private long catalystNetGain(ICraftingPatternDetails pattern,
+                                 IAEItemStack key) {
+        PatternInfo info;
+        try {
+            info = getPatternInfo(pattern);
+        } catch (CalculationFallbackException failure) {
+            // A producer that cannot be statically parsed keeps the original
+            // (craftable) behaviour; the caller only uses this to avoid a
+            // provably futile request.
+            return 1L;
+        }
+        long produced = outputAmount(info, key);
+        for (InputInfo input : info.inputs) {
+            if (input.reusable && sameKey(input.key, key)) {
+                produced = Math.max(0L, produced - input.perCraft);
+            }
+        }
+        return produced;
+    }
+
     private static boolean containsKey(Collection<IAEItemStack> keys,
                                        IAEItemStack key) {
         for (IAEItemStack candidate : keys) {
@@ -986,6 +1053,19 @@ public final class CraftingCalculator {
             return;
         }
 
+        scheduleChoice(choice, normalizedKey, required, frames);
+    }
+
+    /**
+     * Pushes a child pattern frame for a choice that was already resolved by
+     * the caller. Scheduling through this method instead of letting
+     * scheduleRequest resolve again keeps the pattern cache from silently
+     * re-selecting a zero-gain producer that the caller explicitly replaced.
+     */
+    private void scheduleChoice(PatternChoice choice,
+                                IAEItemStack normalizedKey,
+                                long required,
+                                Deque<PatternFrame> frames) {
         long crafts = divideRoundUp(required, choice.outputAmount);
         IAEItemStack childKey = normalizedKey.copy();
         if (!activeKeys.add(childKey)) {
@@ -1003,6 +1083,49 @@ public final class CraftingCalculator {
             return;
         }
         frames.push(new PatternFrame(getPatternInfo(choice.pattern), crafts, childKey));
+    }
+
+    /**
+     * Searches for a crafting pattern that genuinely increases the stock of
+     * {@code key}, i.e. one that does not itself consume and return a copy of
+     * the key as a catalyst. {@code excluded} is the zero-gain producer that
+     * the caller already rejected. Returns an empty choice when every
+     * remaining producer is also zero-gain, cyclic, or unavailable.
+     */
+    private PatternChoice findNetProducer(IAEItemStack key,
+                                          long amountHint,
+                                          ICraftingPatternDetails excluded) {
+        for (ICraftingPatternDetails candidate : getCraftingFor(key, amountHint)) {
+            if (candidate == excluded) {
+                continue;
+            }
+            long candidateOutputAmount = 0L;
+            boolean matchesKey = false;
+            try {
+                PatternInfo info = getPatternInfo(candidate);
+                for (OutputInfo output : info.outputs) {
+                    if (sameKey(output.output, key)) {
+                        matchesKey = true;
+                        candidateOutputAmount = output.amount;
+                        break;
+                    }
+                }
+                if (!matchesKey || catalystNetGain(candidate, key) <= 0L) {
+                    continue;
+                }
+            } catch (CalculationFallbackException failure) {
+                // A producer that cannot be statically parsed keeps the
+                // original behaviour of the caller (record missing).
+                continue;
+            }
+            if (!activeKeys.isEmpty()
+                    && checkCycleCandidate(candidate, amountHint)
+                    != CycleDependencyStatus.SAFE) {
+                continue;
+            }
+            return new PatternChoice(false, candidate, candidateOutputAmount);
+        }
+        return new PatternChoice(false, null, 0L);
     }
 
     private PatternInfo getPatternInfo(ICraftingPatternDetails pattern) {
