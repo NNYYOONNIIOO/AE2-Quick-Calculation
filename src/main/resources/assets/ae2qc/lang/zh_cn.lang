@@ -1,0 +1,17 @@
+ae2qc.toast.title=AE2 快速计算
+ae2qc.toast.separator=：
+ae2qc.toast.elapsed=耗时：%s ms
+ae2qc.toast.optimized=优化计算已完成
+ae2qc.toast.optimized.cycle=自增殖循环优化计算已完成
+ae2qc.toast.fallback=优化失败：已回退到 AE2 原生计算
+ae2qc.toast.fallback.unsupported=优化失败：样板语义不受支持，已回退到 AE2 原生计算
+ae2qc.toast.fallback.substitution=优化失败：替代输入或容器语义不受支持，已回退到 AE2 原生计算
+ae2qc.toast.fallback.container=优化失败：容器或耐久转换不受支持，已回退到 AE2 原生计算
+ae2qc.toast.fallback.cycle=优化失败：无法证明循环配方安全，已回退到 AE2 原生计算
+ae2qc.toast.fallback.cycle_no_seed=优化失败：循环配方缺少种子材料，已回退到 AE2 原生计算
+ae2qc.toast.fallback.cycle_neutral=优化失败：循环配方没有净增益，已回退到 AE2 原生计算
+ae2qc.toast.fallback.cycle_dissipative=优化失败：循环配方净消耗材料，已回退到 AE2 原生计算
+ae2qc.toast.fallback.cycle_complex=优化失败：循环结构过于复杂，已回退到 AE2 原生计算
+ae2qc.toast.fallback.cycle_external=优化失败：循环需要递归处理外部输入，已回退到 AE2 原生计算
+ae2qc.toast.runtime_failure=优化失败：优化器运行时异常，已回退到 AE2 原生计算
+ae2qc.toast.quantity_limit=优化失败：数量超过 1.12.2 上限，已停止计算

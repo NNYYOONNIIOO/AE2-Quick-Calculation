@@ -179,11 +179,11 @@ jar {
     manifest {
         attributes([
             "Specification-Title": "AE2 Quick Calculation",
-            "Specification-Vendor": "ae2_quick_calculation",
+            "Specification-Vendor": "ae2qc",
             "Specification-Version": "1", // We are version 1 of ourselves
             "Implementation-Title": project.name,
             "Implementation-Version": "${version}",
-            "Implementation-Vendor" :"ae2_quick_calculation",
+            "Implementation-Vendor" :"ae2qc",
             "Implementation-Timestamp": new Date().format("yyyy-MM-dd'T'HH:mm:ssZ"),
             "ForceLoadAsMod": "true",
             "FMLCorePluginContainsFMLMod": "true"

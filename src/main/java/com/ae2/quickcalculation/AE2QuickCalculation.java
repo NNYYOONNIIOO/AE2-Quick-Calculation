@@ -21,7 +21,7 @@ import org.apache.logging.log4j.Logger;
         acceptableRemoteVersions = "*"
 )
 public final class AE2QuickCalculation {
-    public static final String MOD_ID = "ae2_quick_calculation";
+    public static final String MOD_ID = "ae2qc";
     public static final String NAME = "AE2 Quick Calculation";
     public static final String VERSION = "1.0.1";
     public static final String TOAST_TITLE = MOD_ID + ".toast.title";
